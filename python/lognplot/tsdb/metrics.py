@@ -43,12 +43,17 @@ class ValueMetrics(Metrics):
     For example, we have the count of samples about which
     these metrics are a summary. Also, we have minimum and
     maximum values.
+
+    Note that addition is not commutative, the chunks are ordered
+    in sequence.
     """
 
-    def __init__(self, count, minimum, maximum, mean, m2):
+    def __init__(self, count, minimum, maximum, first, last, mean, m2):
         self.count = count
         self.minimum = minimum
         self.maximum = maximum
+        self.first = first  # First observed value
+        self.last = last  # Last observed value
         self._mean = mean
         # The M2 value is a handy value for calculating the
         # variance online. See welford method on wikipedia.
@@ -58,7 +63,7 @@ class ValueMetrics(Metrics):
     @classmethod
     def from_value(cls, value):
         """ Convert a single sample into metrics. """
-        return cls(1, value, value, value, 0.0)
+        return cls(1, value, value, value, value, value, 0.0)
 
     def __add__(self, other):
         if isinstance(other, ValueMetrics):
@@ -75,6 +80,8 @@ class ValueMetrics(Metrics):
                 count=count,
                 minimum=min(self.minimum, other.minimum),
                 maximum=max(self.maximum, other.maximum),
+                first=self.first,
+                last=other.last,
                 mean=mean,
                 m2=m2,
             )
@@ -111,29 +118,33 @@ class EventMetrics(Metrics):
     """ Simplest metric, simply counting the events.
     """
 
-    def __init__(self, count):
+    def __init__(self, count, first, last):
         self.count = count
+        self.first = first
+        self.last = last
 
     @classmethod
     def from_event(cls, event):
-        return cls(1)
+        return cls(1, event, event)
 
     def __add__(self, other):
         if isinstance(other, EventMetrics):
             count = self.count + other.count
-            return EventMetrics(count)
+            return EventMetrics(count, self.first, other.last)
         else:  # pragma: no cover
             return NotImplemented
 
 
 class LogMetrics(Metrics):
-    def __init__(self, count):
+    def __init__(self, count, first, last):
         self.count = count
+        self.first = first
+        self.last = last
         self.level_counters = {level: 0 for level in LogLevel.LEVELS}
 
     @classmethod
     def from_record(cls, record):
-        m = cls(0)
+        m = cls(0, record, record)
         m.include(record)
         return m
 
@@ -144,7 +155,7 @@ class LogMetrics(Metrics):
     def __add__(self, other):
         if isinstance(other, LogMetrics):
             count = self.count + other.count
-            result = LogMetrics(count)
+            result = LogMetrics(count, self.first, other.last)
             for level in LogLevel.LEVELS:
                 result.level_counters[level] = (
                     self.level_counters[level] + other.level_counters[level]

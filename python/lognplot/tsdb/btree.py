@@ -4,6 +4,7 @@ Idea is to create summary levels on top of chunks of data.
 """
 
 import abc
+import bisect
 from .metrics import Metrics
 from .aggregation import Aggregation
 from ..time import TimeSpan
@@ -101,9 +102,12 @@ class Btree:
         if selected_aggregations:
             return Aggregation.from_aggregations(selected_aggregations)
 
-    def last_value(self):
-        """ Get last item in the collection """
-        return self.root_node.last_value()
+    def query_value(self, timestamp):
+        """ Query value closest to the given timestamp.
+
+        Return a timestamp value pair as an observation point.
+        """
+        return self.root_node.query_value(timestamp)
 
 
 def enhance(nodes, selection_span):
@@ -150,7 +154,7 @@ class BtreeNode(metaclass=abc.ABCMeta):
         raise NotImplementedError()
 
     @abc.abstractmethod
-    def last_value(self):
+    def query_value(self, timestamp):
         raise NotImplementedError()
 
 
@@ -233,8 +237,17 @@ class BtreeInternalNode(BtreeNode):
     def select_all(self):
         return self._children
 
-    def last_value(self):
-        return self._children[-1].last_value()
+    def query_value(self, timestamp):
+        full_span = self.aggregation.timespan
+        if timestamp < full_span.begin:
+            child_node = self._children[0]
+        elif timestamp > full_span.end:
+            child_node = self._children[-1]
+        else:
+            for child_node in self._children:
+                if child_node.aggregation.timespan.contains_timestamp(timestamp):
+                    break
+        return child_node.query_value(timestamp)
 
 
 class BtreeLeaveNode(BtreeNode):
@@ -308,5 +321,15 @@ class BtreeLeaveNode(BtreeNode):
         """
         return self.samples
 
-    def last_value(self):
-        return self.samples[-1]
+    def query_value(self, timestamp):
+        if not self.samples:
+            return
+
+        # Create a theoretical sample for insertion:
+        sample = (timestamp, 0)
+
+        index = bisect.bisect_left(self.samples, sample)
+        if index >= len(self.samples):
+            index = len(self.samples) - 1
+        # raise NotImplementedError()
+        return self.samples[index]
