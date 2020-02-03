@@ -203,12 +203,11 @@ class KeyValueStore(Store):
         self._options = rocksdb.Options(create_if_missing=True)
         self._db = rocksdb.DB(self._filename, self._options)
         self._batch = None
+        self._lastkey = 0
 
         metadata = self._db.get_live_files_metadata()
         if metadata:
             self._lastkey, = struct.unpack('i', metadata[0]['largestkey'])
-        else:
-            self._lastkey = 0
 
     def next_key(self):
         key = self._lastkey + 1
@@ -238,8 +237,8 @@ class KeyValueStore(Store):
         data = self._db.get(struct.pack('i', key))
         return Node.from_data(data)
 
-    def printTree(self, root):
-        keys = [root]
+    def printTree(self, rootid):
+        keys = [rootid]
 
         while len(keys) > 0:
             key, keys = keys[0], keys[1:]
@@ -250,6 +249,21 @@ class KeyValueStore(Store):
                     keys.extend(node.children())
                 else:
                     print('leaf<{}>: {}'.format(key, node.samples())) 
+
+    def printDot(self, name, rootid):
+        keys = [rootid]
+
+        print('digraph {} {{'.format(name))
+        while len(keys) > 0:
+            key, keys = keys[0], keys[1:]
+            if key is not None:
+                node = self.get(key)
+                if isinstance(node, InternalNode):
+                    for c in node.children():
+                        print('{} -> {}'.format(key, c))
+
+                    keys.extend(node.children())
+        print('}')
 
 class Timespan:
 
@@ -275,9 +289,11 @@ class Signal:
         node = self._store.get(key)
         while isinstance(node, InternalNode):
             self._ancestors.append((key,node))
+            if len(node.children()) == 0:
+                break
             key = node.children()[-1]
             node = self._store.get(key)
-            self._depth = self._depth + 1                
+            self._depth = self._depth + 1
 
     # Adds a new layer of internals starting from the last ancestors, if any 
     def _get_parent(self) -> (int, Node):
@@ -286,7 +302,7 @@ class Signal:
 
         # Traverse the tree upwards if nodes are completely filled
         if len(self._ancestors) > 0:
-            while self._ancestors[-1][1].children() == self._fan_out:
+            while len(self._ancestors) > 0 and len(self._ancestors[-1][1].children()) == self._fan_out:
                 self._ancestors.pop()
 
         if len(self._ancestors) > 0:
@@ -304,12 +320,14 @@ class Signal:
             self._mark_modified(self._rootid, parent)
             # depth just increased by adding another level
             self._depth = self._depth + 1
+            self._ancestors.append((self._rootid,parent))
 
-        for n in range(0, self._depth - len(self._ancestors)):
+        for n in range(0, self._depth - len(self._ancestors) + 1):
             child = InternalNode([],[])
             parent_key = self._add_later(child)
             parent.add_child(parent_key)
             parent = child
+            self._ancestors.append((parent_key, parent))
 
         return (parent_key, parent)
 
@@ -323,9 +341,8 @@ class Signal:
 
     def _store_modifications(self):
         # Trigger all the modification to be updated in the store
-        with self._store as transaction:
-            for key, node in self._modified.items():
-                self._store.set(key, node)
+        for key, node in self._modified.items():
+            self._store.set(key, node)
         self._modified = dict()
 
     def append(self, sample):
@@ -422,9 +439,9 @@ class TimeSeriesDatabase:
                 self._metadata.add_signal(name, rootid)
                 self._store.set(0, self._metadata) 
 
-                signal = Signal(self._store, name, rootid) 
-                self._signals[name] = signal
-                return signal
+            signal = Signal(self._store, name, rootid) 
+            self._signals[name] = signal
+            return signal
         else:
             raise ValueError
 
@@ -453,15 +470,34 @@ class TSDBTest(unittest.TestCase):
         store = Dictionary()
         tsdb = TimeSeriesDatabase(store)
         s = tsdb.add("TestSignal{}".format(len(tsdb.signals())))
+        for i in range(0, 1000000):
+            s.append((i,i))
         tsdb.printSignals()
 
+    @unittest.skip
     def test_add_samples(self):
         store = KeyValueStore('test.db')
         tsdb = TimeSeriesDatabase(store)
         s = tsdb.add("TestSignalWithData{}".format(len(tsdb.signals())))
-        for i in range(0, 100):
-            s.append((i,i))
-        store.printTree(s._rootid)
+        with store as transaction:
+            for i in range(0, 1000000):
+                s.append((i,i))
+        #store.printTree(s._rootid)
+        #store.printDot(s._name, s._rootid)
+
+    @unittest.skip
+    def test_open_store(self):
+        store = KeyValueStore('test.db')
+        tsdb = TimeSeriesDatabase(store)
+
+    @unittest.skip
+    def test_print_tree(self):
+        store = KeyValueStore('test.db')
+        tsdb = TimeSeriesDatabase(store)
+        for name, signal in tsdb.signals().items():
+            #print('Signal {} [{}]'.format(name, signal._rootid))
+            #store.printTree(signal._rootid)
+            store.printDot(name, signal._rootid)
 
 if __name__ == "__main__":
     unittest.main()
