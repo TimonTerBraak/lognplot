@@ -4,127 +4,6 @@ import struct
 from ctypes import *
 import unittest
 
-class TimeSeriesDatabase:
-
-    def __init__(self, store: Store):
-        self._store = store
-        self._signals = dict()
-
-        # Read metadata from the store, or create it if non-existent
-        self._metadata = store.get(0)
-        if not isinstance(self._metadata, EmptyNode):
-            self._metadata = MetaNode([]) 
-            self._store.set(0, self._metadata)
-
-        for name, rootid in self._metadata.signals().items():
-            self._signals[name] = Signal(self._store, name, rootid)
-
-    def add(self, name = "") -> Signal:
-        if name not in self._metadata:
-            node = InternalNode([], [])
-            rootid = self._store.add(node)
-            signal = Signal(self._store, name, rootid) 
-            self._metadata[name] = signal
-            return signal
-       else:
-            raise ValueError
-
-    def get(self, name) -> Signal:
-        return self._metadata[name]
-
-    def signals(self) -> dict():
-        return self._signals
-
-class Timespan:
-
-    def __init__(self, step: float, count: int):
-        pass
-
-class Signal:
-
-    def __init__(self, store, name, rootid, fan_out = 32):
-        self._store = store
-        self._name = name
-        self._rootid = rootid
-        self._fan_out = fan_out
-        self._depth = 0
-        self._ancestors = []
-        self._modified = dict()
-        self.samples = []
-        self._open_tree()
-
-    def _open_tree(self):
-        self._ancestors = []
-        key = self._rootid
-        node = self._store.get(key)
-        while isinstance(node, InternalNode):
-            self._ancestors.append((key,node))
-            key = node.children[-1]
-            node = self._store.get(key)
-            self._depth = self._depth + 1                
-
-    # Adds a new layer of internals starting from the last ancestors, if any 
-    def _get_parent(self) -> (int, Node):
-        parent = None
-        parent_key = 0
-
-        # Traverse the tree upwards if nodes are completely filled
-        while self._ancestors[-1][1].children() == self._fan_out:
-            self._ancestors.pop()
-
-        if len(self._ancestors) > 0:
-            # We are 'halfway' in the tree where there is still some space.
-            parent_key, parent = self._ancestors[-1]
-            # This node will be modified
-            self._mark_modified(parent_key, parent)
-        else:
-            # Complete filling, replace old root with new internal node,
-            # increasing the capacity of the tree.
-            root = self._store.get(self._rootid)
-            new_key_for_old_root = self._add_later(root)
-            parent = InternalNode([], [])
-            parent.add_child(new_key_for_old_root)
-            self._mark_modified(self._rootid, parent)
-            # depth just increased by adding another level
-            self._depth = self._depth + 1
-
-        for n in range(0, self._depth - len(self._ancestors)):
-            child = InternalNode([],[])
-            parent_key = self._add_later(child)
-            parent.add_child(key)
-            parent = child
-
-        return (parent_key, parent)
-
-    def _add_later(self, node: Node) -> int:
-        key = self._store.next_key()
-        self._mark_modified(key, node)
-        return key
-
-    def _mark_modified(self, key: int, node: Node):
-        self._modified[key] = node
-
-    def _store_modifications(self):
-        # Trigger all the modification to be updated in the store
-        with self._store as transaction:
-            for key, node in self._modified.items():
-                self._store.set(key, node)
-        self._modified = dict()
-
-    def append(self, sample):
-        self._samples.append(sample)
-        if len(self._samples) == self._fan_out:
-            parent = self._get_parent()
-            leaf = LeafNode(self.samples)
-            key = self._add_later(leaf)
-            parent[1].add_child(key)
-            self._mark_modified(*parent)
-            self._store_modifications()
-
-    def query(self):
-        pass
-
-
 class Node(metaclass=abc.ABCMeta): 
 
     META_NODE = 1
@@ -136,20 +15,20 @@ class Node(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @classmethod
-    @abs.abstractmethod
-    def from_bytes(cls, data: bytes) -> Node:
+    @abc.abstractmethod
+    def from_bytes(cls, data: bytes):
         raise NotImplementedError
 
     @classmethod
-    def from_data(cls, data: bytes) -> Node:
+    def from_data(cls, data: bytes):
         if data is None or len(data) == 0:
             return None
         nodetype, = struct.unpack_from('i', data)
-        if nodetype == self.META_NODE:
+        if nodetype == cls.META_NODE:
             return MetaNode.from_bytes(data)
-        elif nodetype == self.INTERNAL_NODE:
+        elif nodetype == cls.INTERNAL_NODE:
             return InternalNode.from_bytes(data)
-        elif nodetype == self.LEAF_NODE:
+        elif nodetype == cls.LEAF_NODE:
             return LeafNode.from_bytes(data)
         else:
             raise NotImplementedError
@@ -159,7 +38,7 @@ class MetaNode(Node):
     """
         Signals is a dictionary with name -> root_id
     """
-    def __init__(self, signals):
+    def __init__(self, signals = dict()):
         self._signals = signals
         # TODO: add absolute time for t0, and timebase
 
@@ -174,23 +53,27 @@ class MetaNode(Node):
             return False
 
     def __bytes__(self):
-        meta = struct.pack('ii', len(self._signals))
+        meta = struct.pack('ii', self.META_NODE, len(self._signals))
         for name, rootid in self._signals.items():
-            fmt = "ii{}c".format(len(name))
-            meta = meta.join(struct.pack(fmt, self.META_NODE, rootid, len(name), *name))
+            fmt = "ii{}s".format(len(name))
+            meta = meta + struct.pack(fmt, rootid, len(name), bytes(name, 'utf-8'))
         return meta
 
     @classmethod
-    def from_bytes(cls, count, data):
+    def from_bytes(cls, data):
         signals = dict()
-        offset = 4
+        _, count = struct.unpack_from('ii', data)
+        offset = struct.calcsize('ii')
         for i in range(0, count):
-            l, = struct.unpack_from('i', offset)
-            fmt = "ii{}c".format(l)
-            signal = struct.unpack_from(fmt, data, offset)
-            offset = offset + 4 + 4 + l
-            signals[signal[1]] = signal[0]
-        # TODO: return 
+            fmt = 'ii'
+            rootid, strlen, = struct.unpack_from(fmt, data, offset)
+            offset = offset + struct.calcsize(fmt)
+            fmt = "{}s".format(strlen)
+            name, = struct.unpack_from(fmt, data, offset)
+            offset = offset + struct.calcsize(fmt)
+            signals[name.decode('utf-8')] = rootid
+        return cls(signals)
+
 
 class InternalNode(Node):
 
@@ -217,7 +100,7 @@ class InternalNode(Node):
         children, metrics = struct.unpack_from('ii', data)
         fmt = "ii{}i{}d".format(children, metrics)
         plain = list(struct.unpack(fmt, data))
-        return cls(plain[2:2+count], plain[2+count+1:])
+        return cls(plain[2:2+children], plain[2+children+1:])
 
 class LeafNode(Node):
 
@@ -241,9 +124,16 @@ class LeafNode(Node):
         return cls(list(zip(plain[1::2], plain[2::2])))
 
 
-class Store(metaclass=abc.ABCMeta) 
+
+class Store(metaclass=abc.ABCMeta): 
 
     def __init__(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exit_args):
         pass
 
     @abc.abstractmethod
@@ -340,6 +230,95 @@ class KeyValueStore(Store):
                 else:
                     print('leaf<{}>: {}'.format(key, node.samples())) 
 
+class Timespan:
+
+    def __init__(self, step: float, count: int):
+        pass
+
+class Signal:
+
+    def __init__(self, store, name, rootid, fan_out = 32):
+        self._store = store
+        self._name = name
+        self._rootid = rootid
+        self._fan_out = fan_out
+        self._depth = 0
+        self._ancestors = []
+        self._modified = dict()
+        self.samples = []
+        self._open_tree()
+
+    def _open_tree(self):
+        self._ancestors = []
+        key = self._rootid
+        node = self._store.get(key)
+        while isinstance(node, InternalNode):
+            self._ancestors.append((key,node))
+            key = node.children()[-1]
+            node = self._store.get(key)
+            self._depth = self._depth + 1                
+
+    # Adds a new layer of internals starting from the last ancestors, if any 
+    def _get_parent(self) -> (int, Node):
+        parent = None
+        parent_key = 0
+
+        # Traverse the tree upwards if nodes are completely filled
+        while self._ancestors[-1][1].children() == self._fan_out:
+            self._ancestors.pop()
+
+        if len(self._ancestors) > 0:
+            # We are 'halfway' in the tree where there is still some space.
+            parent_key, parent = self._ancestors[-1]
+            # This node will be modified
+            self._mark_modified(parent_key, parent)
+        else:
+            # Complete filling, replace old root with new internal node,
+            # increasing the capacity of the tree.
+            root = self._store.get(self._rootid)
+            new_key_for_old_root = self._add_later(root)
+            parent = InternalNode([], [])
+            parent.add_child(new_key_for_old_root)
+            self._mark_modified(self._rootid, parent)
+            # depth just increased by adding another level
+            self._depth = self._depth + 1
+
+        for n in range(0, self._depth - len(self._ancestors)):
+            child = InternalNode([],[])
+            parent_key = self._add_later(child)
+            parent.add_child(key)
+            parent = child
+
+        return (parent_key, parent)
+
+    def _add_later(self, node: Node) -> int:
+        key = self._store.next_key()
+        self._mark_modified(key, node)
+        return key
+
+    def _mark_modified(self, key: int, node: Node):
+        self._modified[key] = node
+
+    def _store_modifications(self):
+        # Trigger all the modification to be updated in the store
+        with self._store as transaction:
+            for key, node in self._modified.items():
+                self._store.set(key, node)
+        self._modified = dict()
+
+    def append(self, sample):
+        self._samples.append(sample)
+        if len(self._samples) == self._fan_out:
+            parent = self._get_parent()
+            leaf = LeafNode(self.samples)
+            key = self._add_later(leaf)
+            parent[1].add_child(key)
+            self._mark_modified(*parent)
+            self._store_modifications()
+
+    def query(self):
+        pass
+
 
 class KeyValueStoreTest(unittest.TestCase):
 
@@ -379,7 +358,7 @@ class KeyValueStoreTest(unittest.TestCase):
         node = store.add(InternalNode(leafs, [5, 1, 10]))
         #store.printTree(node)
 
-    def test_batch_write(self):
+    def _test_batch_write(self):
         store = KeyValueStore('test.db')
         with store as transation:
             leafNode = LeafNode([(1,1), (2,2), (3,3), (4,4), (5,5), (6,6), (7,7), (8,8), (9,9), (10,10)])
@@ -392,6 +371,53 @@ class KeyValueStoreTest(unittest.TestCase):
         #store.printTree(node)
 
 
+class TimeSeriesDatabase:
+
+    def __init__(self, store: Store):
+        self._store = store
+        self._signals = dict()
+
+        # Read metadata from the store, or create it if non-existent
+        self._metadata = store.get(0)
+        if self._metadata is None:
+            self._metadata = MetaNode() 
+            self._store.set(0, self._metadata)
+
+        for name, rootid in self._metadata.signals().items():
+            self._signals[name] = Signal(self._store, name, rootid)
+
+    def add(self, name = "") -> Signal:
+        if name not in self._metadata.signals():
+            with self._store as transaction:
+                node = InternalNode([], [])
+                rootid = self._store.add(node)
+                self._metadata.add_signal(name, rootid)
+                self._store.set(0, self._metadata) 
+
+                signal = Signal(self._store, name, rootid) 
+                self._signals[name] = signal
+                return signal
+        else:
+            raise ValueError
+
+    def get(self, name) -> Signal:
+        return self._metadata[name]
+
+    def signals(self) -> dict():
+        return self._signals
+
+    def printSignals(self):
+        for name, signal in self._signals.items():
+            print('{} -> {}'.format(name, signal._rootid))
+
+
+class TSDBTest(unittest.TestCase):
+
+    def test_add_signal(self):
+        store = KeyValueStore('test.db')
+        tsdb = TimeSeriesDatabase(store)
+        s = tsdb.add("TestSignal{}".format(len(tsdb.signals())))
+        tsdb.printSignals()
 
 if __name__ == "__main__":
     unittest.main()
