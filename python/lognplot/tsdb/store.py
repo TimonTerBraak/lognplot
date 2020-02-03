@@ -1,7 +1,7 @@
 import abc
 import rocksdb
 import struct
-from ctypes import *
+import statistics
 import unittest
 
 class Node(metaclass=abc.ABCMeta): 
@@ -52,7 +52,7 @@ class MetaNode(Node):
         else:
             return False
 
-    def __bytes__(self):
+    def __bytes__(self) -> bytes:
         meta = struct.pack('ii', self.META_NODE, len(self._signals))
         for name, rootid in self._signals.items():
             fmt = "ii{}s".format(len(name))
@@ -60,7 +60,7 @@ class MetaNode(Node):
         return meta
 
     @classmethod
-    def from_bytes(cls, data):
+    def from_bytes(cls, data: bytes) -> Node:
         signals = dict()
         _, count = struct.unpack_from('ii', data)
         offset = struct.calcsize('ii')
@@ -87,13 +87,15 @@ class InternalNode(Node):
     def aggregation(self):
         return self._aggregation
 
+    def update_aggregation(self, aggregation):
+        self._aggregation = aggregation
+
     def add_child(self, node: Node):
         self._children.append(node)
-        # TODO: recalculate aggregation
 
     def __bytes__(self):
         fmt = "iii{}i{}d".format(len(self._children), len(self._aggregation))
-        return struct.pack(fmt, self.INTERNAL_NODE, int(len(self._children)), int(len(self._aggregation)), *self._children, *self._aggregation)
+        return struct.pack(fmt, self.INTERNAL_NODE, int(len(self._children)), len(self._aggregation), *self._children, *self._aggregation)
 
     @classmethod
     def from_bytes(cls, data: bytes) -> Node:
@@ -272,7 +274,7 @@ class Timespan:
 
 class Signal:
 
-    def __init__(self, store, name, rootid, fan_out = 32):
+    def __init__(self, store, name, rootid, fan_out = 4):
         self._store = store
         self._name = name
         self._rootid = rootid
@@ -339,20 +341,62 @@ class Signal:
     def _mark_modified(self, key: int, node: Node):
         self._modified[key] = node
 
+    """
+        Update aggregations while the data is coming in, such that
+        the part of the data structure pratically becomes immutable over time.
+
+        Internal: [mean_1, mean2, ..., mean_n]
+    """
+    def _update_aggregation(self, parent: Node, leaf: Node):
+        # Update aggregation of all modified nodes (bottom-up)
+        values = [sample[1] for sample in leaf.samples()]
+        mean = statistics.mean(values)
+        minimum = min(values)
+        maximum = max(values)
+ 
+        parent.update_aggregation([mean, minimum, maximum])
+       
+        # TODO: traverse up the tree of ancestors
+        for key, node in reversed(self._ancestors):
+            print(node.children())
+            nodes = [self._store.get(child) for child in node.children()]
+            values = []
+            if node == parent:
+                nodes.append(leaf)
+                # gather samples of leaf nodes
+                print(nodes)
+                values = [sample[1] for node in nodes for sample in node.samples()]
+            else:
+                # gather mean values of internal ndoes
+                values = []
+
+            #values = [node.aggregation()[0] for node in nodes if node is not None and len(node.aggregation()) > 0]
+            print(values)
+
+            mean = statistics.mean(values)
+            minimum = min(values)
+            maximum = max(values)
+     
+            node.update_aggregation([mean, minimum, maximum])
+            self._mark_modified(key, node)
+
+
     def _store_modifications(self):
+        #self._update_aggregation()
         # Trigger all the modification to be updated in the store
-        for key, node in self._modified.items():
-            self._store.set(key, node)
+        for change in self._modified.items():
+            self._store.set(*change)
         self._modified = dict()
 
     def append(self, sample):
         self._samples.append(sample)
-        if len(self._samples) == self._fan_out:
+        if len(self._samples) == self._fan_out * 2:
             parent = self._get_parent()
             leaf = LeafNode(self._samples)
             key = self._add_later(leaf)
             parent[1].add_child(key)
             self._mark_modified(*parent)
+            self._update_aggregation(parent[1], leaf)
             self._store_modifications()
             self._samples = []
 
@@ -470,19 +514,20 @@ class TSDBTest(unittest.TestCase):
         store = Dictionary()
         tsdb = TimeSeriesDatabase(store)
         s = tsdb.add("TestSignal{}".format(len(tsdb.signals())))
-        for i in range(0, 1000000):
+        for i in range(0, 10000000):
             s.append((i,i))
         tsdb.printSignals()
 
-    @unittest.skip
+    #@unittest.skip
     def test_add_samples(self):
         store = KeyValueStore('test.db')
         tsdb = TimeSeriesDatabase(store)
         s = tsdb.add("TestSignalWithData{}".format(len(tsdb.signals())))
-        with store as transaction:
-            for i in range(0, 1000000):
-                s.append((i,i))
-        #store.printTree(s._rootid)
+
+        #with store as transaction:
+        for i in range(0, 100):
+            s.append((i,i))
+        store.printTree(s._rootid)
         #store.printDot(s._name, s._rootid)
 
     @unittest.skip
