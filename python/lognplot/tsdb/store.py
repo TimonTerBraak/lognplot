@@ -97,10 +97,19 @@ class InternalNode(Node):
 
     @classmethod
     def from_bytes(cls, data: bytes) -> Node:
-        children, metrics = struct.unpack_from('ii', data)
-        fmt = "ii{}i{}d".format(children, metrics)
-        plain = list(struct.unpack(fmt, data))
-        return cls(plain[2:2+children], plain[2+children+1:])
+        children = []
+        aggregation = []
+        fmt = 'iii'
+        _, lc, la = struct.unpack_from(fmt, data)
+        offset = struct.calcsize(fmt)
+        if lc > 0:
+            fmt = "{}i".format(lc)
+            children = list(struct.unpack_from(fmt, data, offset))
+            offset = offset + struct.calcsize(fmt)
+        if la > 0:
+            fmt = "{}d".format(la)
+            aggregation = list(struct.unpack_from(fmt, data, offset))
+        return cls(children, aggregation)
 
 class LeafNode(Node):
 
@@ -118,10 +127,12 @@ class LeafNode(Node):
 
     @classmethod
     def from_bytes(cls, data: bytes) -> Node:
-        count = len(data) - struct.calcsize('i')
-        fmt = "i{}d".format(count)
-        plain = list(struct.unpack(fmt, data))
-        return cls(list(zip(plain[1::2], plain[2::2])))
+        fmt = 'ii'
+        _, ls = struct.unpack_from(fmt, data)
+        offset = struct.calcsize(fmt)
+        fmt = "{}d".format(ls)
+        plain = list(struct.unpack_from(fmt, data, offset))
+        return cls(list(zip(plain[0::2], plain[1::2])))
 
 
 
@@ -135,6 +146,10 @@ class Store(metaclass=abc.ABCMeta):
 
     def __exit__(self, *exit_args):
         pass
+
+    @abc.abstractmethod
+    def next_key(self):
+        raise NotImplementedError
 
     @abc.abstractmethod
     def get(self, key: int):
@@ -156,16 +171,22 @@ class Dictionary(Store):
         self._samples = dict()
         self._lastkey = 0
 
+    def next_key(self):
+        self._lastkey = self._lastkey + 1
+        return self._lastkey
+
     def get(self, key: int):
-        return Node.from_data(self._samples[key])
+        if key in self._samples:
+            return Node.from_data(self._samples[key])
+        return None
 
     def set(self, key: int, node: Node):
         self._samples[key] = bytes(node)
 
     def add(self, node: Node) -> int:
-        self._lastkey = self._lastkey + 1
-        key = self._lastkey
+        key = self.next_key()
         self._samples[key] = bytes(node)
+        return key
 
 
 """
@@ -245,7 +266,7 @@ class Signal:
         self._depth = 0
         self._ancestors = []
         self._modified = dict()
-        self.samples = []
+        self._samples = []
         self._open_tree()
 
     def _open_tree(self):
@@ -264,8 +285,9 @@ class Signal:
         parent_key = 0
 
         # Traverse the tree upwards if nodes are completely filled
-        while self._ancestors[-1][1].children() == self._fan_out:
-            self._ancestors.pop()
+        if len(self._ancestors) > 0:
+            while self._ancestors[-1][1].children() == self._fan_out:
+                self._ancestors.pop()
 
         if len(self._ancestors) > 0:
             # We are 'halfway' in the tree where there is still some space.
@@ -286,7 +308,7 @@ class Signal:
         for n in range(0, self._depth - len(self._ancestors)):
             child = InternalNode([],[])
             parent_key = self._add_later(child)
-            parent.add_child(key)
+            parent.add_child(parent_key)
             parent = child
 
         return (parent_key, parent)
@@ -310,11 +332,12 @@ class Signal:
         self._samples.append(sample)
         if len(self._samples) == self._fan_out:
             parent = self._get_parent()
-            leaf = LeafNode(self.samples)
+            leaf = LeafNode(self._samples)
             key = self._add_later(leaf)
             parent[1].add_child(key)
             self._mark_modified(*parent)
             self._store_modifications()
+            self._samples = []
 
     def query(self):
         pass
@@ -322,19 +345,22 @@ class Signal:
 
 class KeyValueStoreTest(unittest.TestCase):
 
-    def _test_key_generation(self):
+    @unittest.skip
+    def test_key_generation(self):
         store = KeyValueStore('test.db')
         for i in range(store._lastkey, store._lastkey + 100):
             self.assertEqual(i + 1, store.next_key())
 
-    def _test_simple_tree(self):
+    @unittest.skip
+    def test_simple_tree(self):
         store = KeyValueStore('test.db')
         leaf0 = store.add(LeafNode([(1,1), (2,2), (3,3)]))
         leaf1 = store.add(LeafNode([(4,4), (5,5), (6,6)]))
         node2 = store.add(InternalNode([leaf0, leaf1], [3.5, 1, 6]))
         store.printTree(node2)
 
-    def _test_modify_tree(self):
+    @unittest.skip
+    def test_modify_tree(self):
         store = KeyValueStore('test.db')
         leaf0 = store.add(LeafNode([(1,1), (2,2), (3,3)]))
         leaf1 = store.add(LeafNode([(4,4), (5,5), (6,6)]))
@@ -347,7 +373,8 @@ class KeyValueStoreTest(unittest.TestCase):
 
         store.printTree(node6)
 
-    def _test_large_database(self):
+    @unittest.skip
+    def test_large_database(self):
         store = KeyValueStore('test.db')
         leafNode = LeafNode([(1,1), (2,2), (3,3), (4,4), (5,5), (6,6), (7,7), (8,8), (9,9), (10,10)])
         leaf = store.add(leafNode)
@@ -358,7 +385,8 @@ class KeyValueStoreTest(unittest.TestCase):
         node = store.add(InternalNode(leafs, [5, 1, 10]))
         #store.printTree(node)
 
-    def _test_batch_write(self):
+    @unittest.skip
+    def test_batch_write(self):
         store = KeyValueStore('test.db')
         with store as transation:
             leafNode = LeafNode([(1,1), (2,2), (3,3), (4,4), (5,5), (6,6), (7,7), (8,8), (9,9), (10,10)])
@@ -413,11 +441,27 @@ class TimeSeriesDatabase:
 
 class TSDBTest(unittest.TestCase):
 
-    def test_add_signal(self):
+    @unittest.skip
+    def test_add_signal_kvstore(self):
         store = KeyValueStore('test.db')
         tsdb = TimeSeriesDatabase(store)
         s = tsdb.add("TestSignal{}".format(len(tsdb.signals())))
         tsdb.printSignals()
+
+    @unittest.skip
+    def test_add_signal_dictionary(self):
+        store = Dictionary()
+        tsdb = TimeSeriesDatabase(store)
+        s = tsdb.add("TestSignal{}".format(len(tsdb.signals())))
+        tsdb.printSignals()
+
+    def test_add_samples(self):
+        store = KeyValueStore('test.db')
+        tsdb = TimeSeriesDatabase(store)
+        s = tsdb.add("TestSignalWithData{}".format(len(tsdb.signals())))
+        for i in range(0, 100):
+            s.append((i,i))
+        store.printTree(s._rootid)
 
 if __name__ == "__main__":
     unittest.main()
