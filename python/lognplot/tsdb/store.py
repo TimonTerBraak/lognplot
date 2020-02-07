@@ -4,7 +4,7 @@ import struct
 import statistics
 import unittest
 
-class Node(metaclass=abc.ABCMeta): 
+class Node(metaclass=abc.ABCMeta):
 
     META_NODE = 1
     INTERNAL_NODE = 2
@@ -77,41 +77,33 @@ class MetaNode(Node):
 
 class InternalNode(Node):
 
-    def __init__(self, children, aggregation):
+    def __init__(self, children=[]):
         self._children = children
-        self._aggregation = aggregation
 
     def children(self):
         return self._children
 
-    def aggregation(self):
-        return self._aggregation
-
-    def update_aggregation(self, aggregation):
-        self._aggregation = aggregation
-
-    def add_child(self, node: Node):
-        self._children.append(node)
+    def add_child(self, key: int, begin: int, end: int, mean: float):
+        self._children.append((key, begin, end, mean))
 
     def __bytes__(self):
-        fmt = "iii{}i{}d".format(len(self._children), len(self._aggregation))
-        return struct.pack(fmt, self.INTERNAL_NODE, int(len(self._children)), len(self._aggregation), *self._children, *self._aggregation)
+        data = struct.pack("ii", self.INTERNAL_NODE, int(len(self._children)))
+        for child in self._children:
+            data = data + struct.pack("iiid", *child)
+        return data
 
     @classmethod
     def from_bytes(cls, data: bytes) -> Node:
         children = []
-        aggregation = []
-        fmt = 'iii'
-        _, lc, la = struct.unpack_from(fmt, data)
+        fmt = 'ii'
+        _, lc = struct.unpack_from(fmt, data)
         offset = struct.calcsize(fmt)
-        if lc > 0:
-            fmt = "{}i".format(lc)
-            children = list(struct.unpack_from(fmt, data, offset))
+        fmt = "iiid"
+        for _ in range(0, lc):
+            children.append(tuple(struct.unpack_from(fmt, data, offset)))
             offset = offset + struct.calcsize(fmt)
-        if la > 0:
-            fmt = "{}d".format(la)
-            aggregation = list(struct.unpack_from(fmt, data, offset))
-        return cls(children, aggregation)
+
+        return cls(children)
 
 class LeafNode(Node):
 
@@ -132,13 +124,12 @@ class LeafNode(Node):
         fmt = 'ii'
         _, ls = struct.unpack_from(fmt, data)
         offset = struct.calcsize(fmt)
-        fmt = "{}d".format(ls)
+        fmt = "{}d".format(ls * 2)
         plain = list(struct.unpack_from(fmt, data, offset))
         return cls(list(zip(plain[0::2], plain[1::2])))
 
 
-
-class Store(metaclass=abc.ABCMeta): 
+class Store(metaclass=abc.ABCMeta):
 
     def __init__(self):
         pass
@@ -159,11 +150,11 @@ class Store(metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
     def set(self, key: int, node: Node):
-        raise NotImplementedError 
+        raise NotImplementedError
 
     @abc.abstractmethod
     def add(self, node: Node) -> int:
-        raise NotImplementedError 
+        raise NotImplementedError
 
 
 class Dictionary(Store):
@@ -235,8 +226,8 @@ class KeyValueStore(Store):
         self.set(key, node)
         return key
 
-    def get(self, key):
-        data = self._db.get(struct.pack('i', key))
+    def get(self, key: int):
+        data = self._db.get(struct.pack('i', int(key)))
         return Node.from_data(data)
 
     def printTree(self, rootid):
@@ -247,10 +238,11 @@ class KeyValueStore(Store):
             if key is not None:
                 node = self.get(key)
                 if isinstance(node, InternalNode):
-                    print('node<{}>: {}, {}'.format(key, node.children(), node.aggregation()))
-                    keys.extend(node.children())
+                    print('node<{}>: {}'.format(key, node.children()))
+                    for c in node.children():
+                        keys.append(c[0])
                 else:
-                    print('leaf<{}>: {}'.format(key, node.samples())) 
+                    print('leaf<{}>: {}'.format(key, node.samples()))
 
     def printDot(self, name, rootid):
         keys = [rootid]
@@ -262,9 +254,8 @@ class KeyValueStore(Store):
                 node = self.get(key)
                 if isinstance(node, InternalNode):
                     for c in node.children():
-                        print('{} -> {}'.format(key, c))
-
-                    keys.extend(node.children())
+                        print('{} -> {}'.format(key, c[0]))
+                        keys.append(c[0])
         print('}')
 
 class Timespan:
@@ -293,7 +284,7 @@ class Signal:
             self._ancestors.append((key,node))
             if len(node.children()) == 0:
                 break
-            key = node.children()[-1]
+            key = node.children()[-1][0]
             node = self._store.get(key)
             self._depth = self._depth + 1
 
@@ -317,17 +308,17 @@ class Signal:
             # increasing the capacity of the tree.
             root = self._store.get(self._rootid)
             new_key_for_old_root = self._add_later(root)
-            parent = InternalNode([], [])
-            parent.add_child(new_key_for_old_root)
+            parent = InternalNode()
+            parent.add_child(new_key_for_old_root, 0, 0, 0) # TODO
             self._mark_modified(self._rootid, parent)
             # depth just increased by adding another level
             self._depth = self._depth + 1
             self._ancestors.append((self._rootid,parent))
 
         for n in range(0, self._depth - len(self._ancestors) + 1):
-            child = InternalNode([],[])
+            child = InternalNode()
             parent_key = self._add_later(child)
-            parent.add_child(parent_key)
+            parent.add_child(parent_key, 0, 0, 0) # TODO
             parent = child
             self._ancestors.append((parent_key, parent))
 
@@ -341,46 +332,6 @@ class Signal:
     def _mark_modified(self, key: int, node: Node):
         self._modified[key] = node
 
-    """
-        Update aggregations while the data is coming in, such that
-        the part of the data structure pratically becomes immutable over time.
-
-        Internal: [mean_1, mean2, ..., mean_n]
-    """
-    def _update_aggregation(self, parent: Node, leaf: Node):
-        # Update aggregation of all modified nodes (bottom-up)
-        values = [sample[1] for sample in leaf.samples()]
-        mean = statistics.mean(values)
-        minimum = min(values)
-        maximum = max(values)
- 
-        parent.update_aggregation([mean, minimum, maximum])
-       
-        # TODO: traverse up the tree of ancestors
-        for key, node in reversed(self._ancestors):
-            print(node.children())
-            nodes = [self._store.get(child) for child in node.children()]
-            values = []
-            if node == parent:
-                nodes.append(leaf)
-                # gather samples of leaf nodes
-                print(nodes)
-                values = [sample[1] for node in nodes for sample in node.samples()]
-            else:
-                # gather mean values of internal ndoes
-                values = []
-
-            #values = [node.aggregation()[0] for node in nodes if node is not None and len(node.aggregation()) > 0]
-            print(values)
-
-            mean = statistics.mean(values)
-            minimum = min(values)
-            maximum = max(values)
-     
-            node.update_aggregation([mean, minimum, maximum])
-            self._mark_modified(key, node)
-
-
     def _store_modifications(self):
         #self._update_aggregation()
         # Trigger all the modification to be updated in the store
@@ -388,15 +339,22 @@ class Signal:
             self._store.set(*change)
         self._modified = dict()
 
+    """
+        Update aggregations while the data is coming in, such that
+        the part of the data structure pratically becomes immutable over time.
+
+        Internal: [mean_1, mean2, ..., mean_n]
+    """
     def append(self, sample):
         self._samples.append(sample)
-        if len(self._samples) == self._fan_out * 2:
+        if len(self._samples) == self._fan_out:
             parent = self._get_parent()
             leaf = LeafNode(self._samples)
             key = self._add_later(leaf)
-            parent[1].add_child(key)
+            mean = statistics.mean([sample[1] for sample in self._samples])
+            # add this leaf to its parent with (begin, end, mean)
+            parent[1].add_child(key, self._samples[0][0], self._samples[-1][0], mean)
             self._mark_modified(*parent)
-            self._update_aggregation(parent[1], leaf)
             self._store_modifications()
             self._samples = []
 
@@ -478,7 +436,7 @@ class TimeSeriesDatabase:
     def add(self, name = "") -> Signal:
         if name not in self._metadata.signals():
             with self._store as transaction:
-                node = InternalNode([], [])
+                node = InternalNode([])
                 rootid = self._store.add(node)
                 self._metadata.add_signal(name, rootid)
                 self._store.set(0, self._metadata) 
@@ -525,7 +483,7 @@ class TSDBTest(unittest.TestCase):
         s = tsdb.add("TestSignalWithData{}".format(len(tsdb.signals())))
 
         #with store as transaction:
-        for i in range(0, 100):
+        for i in range(0, 17):
             s.append((i,i))
         store.printTree(s._rootid)
         #store.printDot(s._name, s._rootid)
