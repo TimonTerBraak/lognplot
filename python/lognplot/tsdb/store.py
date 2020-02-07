@@ -77,7 +77,7 @@ class MetaNode(Node):
 
 class InternalNode(Node):
 
-    def __init__(self, children=[]):
+    def __init__(self, children):
         self._children = children
 
     def children(self):
@@ -85,6 +85,12 @@ class InternalNode(Node):
 
     def add_child(self, key: int, begin: int, end: int, mean: float):
         self._children.append((key, begin, end, mean))
+
+    def aggregation(self):
+        _, start, _, _ = self._children[0]
+        _, _, end, _ = self._children[-1]
+        mean = sum(y for _, _, _, y in self._children) / len(self._children)
+        return (start, end, mean)
 
     def __bytes__(self):
         data = struct.pack("ii", self.INTERNAL_NODE, int(len(self._children)))
@@ -107,11 +113,17 @@ class InternalNode(Node):
 
 class LeafNode(Node):
 
-    def __init__(self, data):
-        self._data = data
+    def __init__(self, samples):
+        self._samples = samples
 
     def samples(self):
-        return self._data
+        return self._samples
+
+    def aggregation(self):
+        start = self._samples[0][0]
+        end = self._samples[-1][0]
+        mean = sum(y for _, y in self._samples) / len(self._samples)
+        return (start, end, mean)
 
     def __bytes__(self):
         ls = len(self.samples())
@@ -284,45 +296,43 @@ class Signal:
             self._ancestors.append((key,node))
             if len(node.children()) == 0:
                 break
-            key = node.children()[-1][0]
+            key, _, _, _ = node.children()[-1]
             node = self._store.get(key)
             self._depth = self._depth + 1
 
-    # Adds a new layer of internals starting from the last ancestors, if any 
+    # Adds a new layer of internals starting from the last ancestors, if any
     def _get_parent(self) -> (int, Node):
-        parent = None
-        parent_key = 0
+        return self._ancestors[-1]
 
+    def _maybe_expand_tree(self):
         # Traverse the tree upwards if nodes are completely filled
-        if len(self._ancestors) > 0:
-            while len(self._ancestors) > 0 and len(self._ancestors[-1][1].children()) == self._fan_out:
-                self._ancestors.pop()
+        while len(self._ancestors) > 0 and len(self._ancestors[-1][1].children()) == self._fan_out:
+            key, node = self._ancestors.pop()
+            if len(self._ancestors) > 0:
+                parent_key, parent = self._ancestors[-1]
+                parent._children[-1] = (key, *node.aggregation())
+                self._mark_modified(parent_key, parent)
 
-        if len(self._ancestors) > 0:
-            # We are 'halfway' in the tree where there is still some space.
-            parent_key, parent = self._ancestors[-1]
-            # This node will be modified
-            self._mark_modified(parent_key, parent)
-        else:
+        if len(self._ancestors) == 0:
             # Complete filling, replace old root with new internal node,
             # increasing the capacity of the tree.
             root = self._store.get(self._rootid)
             new_key_for_old_root = self._add_later(root)
-            parent = InternalNode()
-            parent.add_child(new_key_for_old_root, 0, 0, 0) # TODO
+            parent = InternalNode([])
+            parent.add_child(new_key_for_old_root, *root.aggregation())
             self._mark_modified(self._rootid, parent)
             # depth just increased by adding another level
             self._depth = self._depth + 1
-            self._ancestors.append((self._rootid,parent))
+            self._ancestors = [(self._rootid, parent)]
 
-        for n in range(0, self._depth - len(self._ancestors) + 1):
-            child = InternalNode()
-            parent_key = self._add_later(child)
-            parent.add_child(parent_key, 0, 0, 0) # TODO
-            parent = child
-            self._ancestors.append((parent_key, parent))
-
-        return (parent_key, parent)
+        while len(self._ancestors) <= self._depth:
+            parent_key, parent = self._ancestors[-1]
+            child = InternalNode([])
+            child_key = self._add_later(child)
+            # TODO: set type to OpenInternalNode? to indicate invalid aggregation?
+            parent.add_child(child_key, 0, 0, 0)
+            self._mark_modified(parent_key, parent)
+            self._ancestors.append((child_key, child))
 
     def _add_later(self, node: Node) -> int:
         key = self._store.next_key()
@@ -330,11 +340,12 @@ class Signal:
         return key
 
     def _mark_modified(self, key: int, node: Node):
-        self._modified[key] = node
+        #self._modified[key] = node
+        self._store.set(key, node)
 
     def _store_modifications(self):
-        #self._update_aggregation()
         # Trigger all the modification to be updated in the store
+        return
         for change in self._modified.items():
             self._store.set(*change)
         self._modified = dict()
@@ -348,13 +359,13 @@ class Signal:
     def append(self, sample):
         self._samples.append(sample)
         if len(self._samples) == self._fan_out:
-            parent = self._get_parent()
+            parent_key, parent = self._get_parent()
             leaf = LeafNode(self._samples)
             key = self._add_later(leaf)
-            mean = statistics.mean([sample[1] for sample in self._samples])
             # add this leaf to its parent with (begin, end, mean)
-            parent[1].add_child(key, self._samples[0][0], self._samples[-1][0], mean)
-            self._mark_modified(*parent)
+            parent.add_child(key, *leaf.aggregation())
+            self._maybe_expand_tree()
+            self._mark_modified(parent_key, parent)
             self._store_modifications()
             self._samples = []
 
@@ -483,7 +494,7 @@ class TSDBTest(unittest.TestCase):
         s = tsdb.add("TestSignalWithData{}".format(len(tsdb.signals())))
 
         #with store as transaction:
-        for i in range(0, 17):
+        for i in range(0, 128):
             s.append((i,i))
         store.printTree(s._rootid)
         #store.printDot(s._name, s._rootid)
