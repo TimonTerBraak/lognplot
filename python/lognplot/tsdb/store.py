@@ -1,7 +1,6 @@
 import abc
 import rocksdb
 import struct
-import statistics
 import unittest
 
 class Node(metaclass=abc.ABCMeta):
@@ -205,7 +204,7 @@ class KeyValueStore(Store):
     """
     def __init__(self, filename):
         self._filename = filename
-        self._options = rocksdb.Options(create_if_missing=True)
+        self._options = rocksdb.Options(create_if_missing=True, compression=rocksdb.CompressionType.lz4_compression)
         self._db = rocksdb.DB(self._filename, self._options)
         self._batch = None
         self._lastkey = 0
@@ -277,14 +276,13 @@ class Timespan:
 
 class Signal:
 
-    def __init__(self, store, name, rootid, fan_out = 4):
+    def __init__(self, store, name, rootid, fan_out = 16):
         self._store = store
         self._name = name
         self._rootid = rootid
         self._fan_out = fan_out
         self._depth = 0
         self._ancestors = []
-        self._modified = dict()
         self._samples = []
         self._open_tree()
 
@@ -306,21 +304,24 @@ class Signal:
 
     def _maybe_expand_tree(self):
         # Traverse the tree upwards if nodes are completely filled
-        while len(self._ancestors) > 0 and len(self._ancestors[-1][1].children()) == self._fan_out:
+        parent = self._ancestors[-1][1] if len(self._ancestors) > 0 else None
+        while parent is not None and len(parent.children()) == self._fan_out:
             key, node = self._ancestors.pop()
             if len(self._ancestors) > 0:
                 parent_key, parent = self._ancestors[-1]
                 parent._children[-1] = (key, *node.aggregation())
-                self._mark_modified(parent_key, parent)
+                self._store.set(parent_key, parent)
+            else:
+                parent = None
 
-        if len(self._ancestors) == 0:
+        if parent is None:
             # Complete filling, replace old root with new internal node,
             # increasing the capacity of the tree.
             root = self._store.get(self._rootid)
-            new_key_for_old_root = self._add_later(root)
+            new_key_for_old_root = self._add_node(root)
             parent = InternalNode([])
             parent.add_child(new_key_for_old_root, *root.aggregation())
-            self._mark_modified(self._rootid, parent)
+            self._store.set(self._rootid, parent)
             # depth just increased by adding another level
             self._depth = self._depth + 1
             self._ancestors = [(self._rootid, parent)]
@@ -328,45 +329,28 @@ class Signal:
         while len(self._ancestors) <= self._depth:
             parent_key, parent = self._ancestors[-1]
             child = InternalNode([])
-            child_key = self._add_later(child)
+            child_key = self._add_node(child)
             # TODO: set type to OpenInternalNode? to indicate invalid aggregation?
             parent.add_child(child_key, 0, 0, 0)
-            self._mark_modified(parent_key, parent)
+            self._store.set(parent_key, parent)
             self._ancestors.append((child_key, child))
 
-    def _add_later(self, node: Node) -> int:
+    def _add_node(self, node: Node) -> int:
         key = self._store.next_key()
-        self._mark_modified(key, node)
+        self._store.set(key, node)
         return key
 
-    def _mark_modified(self, key: int, node: Node):
-        #self._modified[key] = node
-        self._store.set(key, node)
-
-    def _store_modifications(self):
-        # Trigger all the modification to be updated in the store
-        return
-        for change in self._modified.items():
-            self._store.set(*change)
-        self._modified = dict()
-
-    """
-        Update aggregations while the data is coming in, such that
-        the part of the data structure pratically becomes immutable over time.
-
-        Internal: [mean_1, mean2, ..., mean_n]
-    """
-    def append(self, sample):
+    def append(self, sample: (int, float)):
         self._samples.append(sample)
         if len(self._samples) == self._fan_out:
-            parent_key, parent = self._get_parent()
-            leaf = LeafNode(self._samples)
-            key = self._add_later(leaf)
-            # add this leaf to its parent with (begin, end, mean)
-            parent.add_child(key, *leaf.aggregation())
-            self._maybe_expand_tree()
-            self._mark_modified(parent_key, parent)
-            self._store_modifications()
+            with self._store as transaction:
+                parent_key, parent = self._get_parent()
+                leaf = LeafNode(self._samples)
+                key = self._add_node(leaf)
+                # add this leaf to its parent with (begin, end, mean)
+                parent.add_child(key, *leaf.aggregation())
+                self._store.set(parent_key, parent)
+                self._maybe_expand_tree()
             self._samples = []
 
     def query(self):
@@ -493,10 +477,9 @@ class TSDBTest(unittest.TestCase):
         tsdb = TimeSeriesDatabase(store)
         s = tsdb.add("TestSignalWithData{}".format(len(tsdb.signals())))
 
-        #with store as transaction:
-        for i in range(0, 128):
+        for i in range(0, 1000000):
             s.append((i,i))
-        store.printTree(s._rootid)
+        #store.printTree(s._rootid)
         #store.printDot(s._name, s._rootid)
 
     @unittest.skip
