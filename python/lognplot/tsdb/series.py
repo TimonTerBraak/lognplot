@@ -1,5 +1,6 @@
 import abc
 from .btree import Btree
+from .store import *
 from .aggregation import Aggregation
 from ..time import TimeSpan
 from .log import LogRecord

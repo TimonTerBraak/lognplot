@@ -42,3 +42,6 @@ class Aggregation:
             return Aggregation(timespan, metrics)
         else:  # pragma: no cover
             return NotImplemented
+
+    def __repr__(self):
+        return (f"{self.timespan}: {self.metrics}")
