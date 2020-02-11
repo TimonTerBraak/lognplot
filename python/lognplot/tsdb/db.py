@@ -1,9 +1,46 @@
 """ Time series database.
 """
 
-from .series import ZoomSerie, FuncSerie
+import abc
+from typing import Iterator
 from .aggregation import Aggregation
+from .series import Series
 from ..time import TimeSpan
+
+class TimeSeriesDatabase(metaclass=abc.ABCMeta):
+
+    @abc.abstractmethod
+    def __init__(self, cls: Series):
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def __iter__(self) -> Iterator[Series]:
+        """ Iterators over all series contained in the store.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def next_key(self):
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def add_to_index(self, key: int, name: str):
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def get(self, key: int):
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def set(self, key: int, data: bytes):
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def add(self, data: bytes) -> int:
+        raise NotImplementedError
+
+
+#from .series import ZoomSerie, FuncSerie
 
 
 class TsDb:
@@ -36,20 +73,22 @@ class TsDb:
             return self._traces[name]
 
     def get_or_create_serie(self, name):
-        if name in self._traces:
-            serie = self._traces[name]
-        else:
-            serie = ZoomSerie()
-            self._traces[name] = serie
-            self.notify_changed()
-        return serie
+        #if name in self._traces:
+        #    serie = self._traces[name]
+        #else:
+        #    serie = ZoomSerie()
+        #    self._traces[name] = serie
+        #    self.notify_changed()
+        #return serie
+        pass
 
     # Math operation!
     def add_function(self, name, expr):
         # TODO: name clash?
-        assert name not in self._traces
-        serie = FuncSerie(self, expr)
-        self._traces[name] = serie
+        #assert name not in self._traces
+        #serie = FuncSerie(self, expr)
+        #self._traces[name] = serie
+        pass
 
     # Data insertion functions:
     def add_sample(self, name: str, sample):

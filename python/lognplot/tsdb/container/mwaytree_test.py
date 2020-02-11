@@ -7,6 +7,7 @@ import unittest
 from lognplot.time.timespan import *
 from lognplot.tsdb.aggregation import *
 from lognplot.tsdb.metrics import *
+from .storage import Store
 
 class MWayTreeNode(metaclass=abc.ABCMeta):
 
@@ -252,126 +253,10 @@ class MWayTreeLeafNode(MWayTreeNode):
 
         return self._samples[index] if index < len(self._samples) else None
 
-class Store(metaclass=abc.ABCMeta):
-
-    def __init__(self):
-        pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exit_args):
-        pass
-
-    @abc.abstractmethod
-    def next_key(self):
-        raise NotImplementedError
-
-    @abc.abstractmethod
-    def get(self, key: int):
-        raise NotImplementedError
-
-    @abc.abstractmethod
-    def set(self, key: int, node: MWayTreeNode):
-        raise NotImplementedError
-
-    @abc.abstractmethod
-    def add(self, node: MWayTreeNode) -> int:
-        raise NotImplementedError
-
-
-class Dictionary(Store):
-
-    def __init__(self):
-        self._signals = dict()
-        self._samples = dict()
-        self._lastkey = 0
-
-    def next_key(self):
-        self._lastkey = self._lastkey + 1
-        return self._lastkey
-
-    def get(self, key: int):
-        if key in self._samples:
-            return MWayTreeNode.from_data(self._samples[key])
-        return None
-
-    def set(self, key: int, node: MWayTreeNode):
-        self._samples[key] = bytes(node)
-
-    def add(self, node: MWayTreeNode) -> int:
-        key = self.next_key()
-        self._samples[key] = bytes(node)
-        return key
-
-
-"""
-    NODE: key -> (count, children[], aggregation[])
-    LEAF: key -> (count, samples[])
-"""
-class KeyValueStore(Store):
-
-    """
-        Key 0 is reserved for metadata.
-    """
-    def __init__(self, filename='lognplot.db'):
-        self._filename = filename
-        self._options = rocksdb.Options(create_if_missing=True, compression=rocksdb.CompressionType.lz4_compression)
-        self._db = rocksdb.DB(self._filename, self._options)
-        self._lastkey = 0
-
-        metadata = self._db.get_live_files_metadata()
-        if metadata:
-            self._lastkey, = struct.unpack('i', metadata[0]['largestkey'])
-
-    def next_key(self):
-        key = self._lastkey + 1
-        self._lastkey = key
-        return key
-
-    def set(self, key, node):
-        self._db.put(struct.pack('i', key), bytes(node))
-
-    def add(self, node):
-        key = self.next_key()
-        self.set(key, node)
-        return key
-
-    def get(self, key: int):
-        data = self._db.get(struct.pack('i', int(key)))
-        return MWayTreeNode.from_data(data)
-
-    def printTree(self, rootid):
-        keys = [rootid]
-
-        while len(keys) > 0:
-            key, keys = keys[0], keys[1:]
-            if key is not None:
-                node = self.get(key)
-                if isinstance(node, MWayTreeInternalNode):
-                    print('node<{}>: {}'.format(key, node.children()))
-                    for c in node.children():
-                        keys.append(c[0])
-                else:
-                    print('leaf<{}>: {}'.format(key, node.samples()))
-
-    def printDot(self, name, rootid):
-        keys = [rootid]
-
-        print('digraph {} {{'.format(name))
-        while len(keys) > 0:
-            key, keys = keys[0], keys[1:]
-            if key is not None:
-                node = self.get(key)
-                if isinstance(node, MWayTreeInternalNode):
-                    for c in node.children():
-                        print('{} -> {}'.format(key, c[0]))
-                        keys.append(c[0])
-        print('}')
 
 class MWayTree:
 
-    def __init__(self, store, name, rootid, fan_out = 16):
+    def __init__(self, store: Store, name: str, rootid: int, fan_out: int = 16):
         self._store = store
         self._name = name
         self._rootid = rootid
