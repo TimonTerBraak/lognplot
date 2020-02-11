@@ -5,24 +5,69 @@ Idea is to create summary levels on top of chunks of data.
 
 import abc
 import bisect
-from .metrics import Metrics
-from .aggregation import Aggregation
-from ..time import TimeSpan
+from ..metrics import Metrics
+from ..aggregation import Aggregation
+from ...time import TimeSpan
+from ..db import TimeSeriesDatabase
+from ..series import Series
 
+class BtreeNode(metaclass=abc.ABCMeta):
 
-class Btree:
     def __init__(self):
+        pass
+
+    @abc.abstractmethod
+    def select_range(self, selection_span: TimeSpan):
+        raise NotImplementedError()
+
+    @abc.abstractmethod
+    def select_all(self):
+        raise NotImplementedError()
+
+    @abc.abstractmethod
+    def query_value(self, timestamp):
+        raise NotImplementedError()
+
+
+def enhance(nodes, selection_span: TimeSpan):
+    """ Enhance resolution of samples in the selected time span.
+    """
+    assert nodes
+    new_nodes = []
+    if len(nodes) == 1:
+        new_nodes.extend(nodes[0].select_range(selection_span))
+    else:
+        # Assume here first and last selected node overlap partially.
+        assert len(nodes) > 1
+        new_nodes.extend(nodes[0].select_range(selection_span))
+        for node in nodes[1:-1]:
+            new_nodes.extend(node.select_all())
+        new_nodes.extend(nodes[-1].select_range(selection_span))
+    return new_nodes
+
+
+class Btree(Series):
+    def __init__(self, db: TimeSeriesDatabase, name: str, identifier: int = -1):
+        self._name = name
+        self._identifier = db.next_key() if identifier < 0 else identifier
         self._leave_max = 32
         self._internal_node_max = 5
         self.root_node = BtreeLeaveNode(self._leave_max)
+        db.add_to_index(self._identifier, self._name)
+
+    def name(self):
+        return self._name
+
+    def identifier(self):
+        return self._identifier
 
     @property
     def aggregation(self):
         return self.root_node.aggregation
 
-    def append(self, sample):
+    def add(self, sample):
         """ Append a single sample. """
-        root_sibling = self.root_node.append(sample)
+        root_sibling = self.root_node.add(sample)
         if root_sibling:
             self._new_root(root_sibling)
 
@@ -34,7 +79,7 @@ class Btree:
             raise NotImplementedError("bulk load")
         else:
             for sample in samples:
-                self.append(sample)
+                self.add(sample)
 
     def _new_root(self, root_sibling):
         """ Construct a new root from the old root and a sibling. """
@@ -108,54 +153,6 @@ class Btree:
         Return a timestamp value pair as an observation point.
         """
         return self.root_node.query_value(timestamp)
-
-
-def enhance(nodes, selection_span):
-    """ Enhance resolution by descending into child nodes in the selected time span.
-    """
-    assert nodes
-    new_nodes = []
-    if len(nodes) == 1:
-        new_nodes.extend(nodes[0].select_range(selection_span))
-    else:
-        # Assume here first and last selected node overlap partially.
-        assert len(nodes) > 1
-        new_nodes.extend(nodes[0].select_range(selection_span))
-        for node in nodes[1:-1]:
-            new_nodes.extend(node.select_all())
-        new_nodes.extend(nodes[-1].select_range(selection_span))
-    return new_nodes
-
-
-class BtreeNode(metaclass=abc.ABCMeta):
-    """ Base class for either internal, or leave nodes of the B-tree.
-
-    This class and it's subclasses are for internal usage in the B-tree.
-    Do not use outside this file.
-    """
-
-    def __init__(self):
-        pass
-
-    @abc.abstractmethod
-    def append(self, sample):
-        raise NotImplementedError()
-
-    @abc.abstractmethod
-    def append_leave(self, leave_node):
-        raise NotImplementedError()
-
-    @abc.abstractmethod
-    def select_range(self, selection_span: TimeSpan):
-        raise NotImplementedError()
-
-    @abc.abstractmethod
-    def select_all(self):
-        raise NotImplementedError()
-
-    @abc.abstractmethod
-    def query_value(self, timestamp):
-        raise NotImplementedError()
 
 
 class BtreeInternalNode(BtreeNode):
@@ -270,7 +267,7 @@ class BtreeLeaveNode(BtreeNode):
         return len(self.samples) >= self.max_samples
 
     def _add_sample(self, sample):
-        self.samples.append(sample)
+        self.samples.add(sample)
 
         # Update metrics:
         aggregation = Aggregation.from_sample(sample)
@@ -279,7 +276,7 @@ class BtreeLeaveNode(BtreeNode):
         else:
             self._aggregation = aggregation
 
-    def append(self, sample):
+    def add(self, sample):
         if len(self.samples) < self.max_samples:
             self._add_sample(sample)
         else:
@@ -309,7 +306,7 @@ class BtreeLeaveNode(BtreeNode):
             # Find first node:
             for sample in self.samples:
                 if selection_span.contains_timestamp(sample[0]):
-                    in_range_samples.append(sample)
+                    in_range_samples.add(sample)
         else:
             # out of range
             pass
