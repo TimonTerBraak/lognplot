@@ -9,6 +9,8 @@ from ..time import TimeSpan
 
 class TimeSeriesDatabase(metaclass=abc.ABCMeta):
 
+    _tokens = 0
+
     @abc.abstractmethod
     def __init__(self, cls: Series):
         raise NotImplementedError
@@ -24,7 +26,7 @@ class TimeSeriesDatabase(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def add_to_index(self, key: int, name: str):
+    def create(self, name: str) -> Series:
         raise NotImplementedError
 
     @abc.abstractmethod
@@ -39,48 +41,32 @@ class TimeSeriesDatabase(metaclass=abc.ABCMeta):
     def add(self, data: bytes) -> int:
         raise NotImplementedError
 
+    def get_series(self, name):
+        found = None
+        for series in self:
+            if series.name() == name:
+                found = series
+        return found
 
-#from .series import ZoomSerie, FuncSerie
+    def get_series_type(self, name):
+        series = self.get_series(name)
+        return series.get_type() if series is not None else None
 
-
-class TsDb:
-    """ A time series database.
-    """
-
-    def __init__(self):
-        # TODO: load / store data in file!
-        self._traces = {}  # The internal trace data.
-        self._tokens = 0
-        self._event_backlog = False
-        self._callbacks = []
-
-    def clear(self):
-        """ Remove all signals from the database. """
-        self._traces.clear()
+    def get_or_create_series(self, name):
+        series = self.get_series(name)
+        if series is None:
+            series = self.create(name)
+            self.notify_changed()
+        return series
 
     def signal_names_and_types(self):
         """ Get a sorted list of signal names. """
-        names_and_types = [(name, self.get_serie_type(name)) for name in self._traces]
+        names_and_types = [(series.name(), self.get_series_type(series.name())) for series in self]
         return list(sorted(names_and_types))
 
-    def get_serie_type(self, name):
-        serie = self.get_serie(name)
-        if serie:
-            return serie.get_type()
-
-    def get_serie(self, name):
-        if name in self._traces:
-            return self._traces[name]
-
-    def get_or_create_serie(self, name):
-        #if name in self._traces:
-        #    serie = self._traces[name]
-        #else:
-        #    serie = ZoomSerie()
-        #    self._traces[name] = serie
-        #    self.notify_changed()
-        #return serie
-        pass
+    def clear(self):
+        """ Remove all signals from the database. """
+        raise NotImplementedError()
 
     # Math operation!
     def add_function(self, name, expr):
@@ -93,33 +79,37 @@ class TsDb:
     # Data insertion functions:
     def add_sample(self, name: str, sample):
         """ Add a single sample to the given series. """
-        serie = self.get_or_create_serie(name)
-        serie.add_sample(sample)
+        series = self.get_or_create_series(name)
+        series.add_sample(sample)
         self.notify_changed()
 
     def add_samples(self, name: str, samples):
         """ Add samples to the given series. """
-        serie = self.get_or_create_serie(name)
-        serie.add_samples(samples)
+        series = self.get_or_create_series(name)
+        for s in samples:
+            series.add(s)
         self.notify_changed()
 
     # Query related functions:
-    def query_summary(self, name: str, timespan=None) -> Aggregation:
-        serie = self.get_serie(name)
-        if serie:
-            return serie.query_summary(selection_timespan=timespan)
+    def query_metrics(self, name: str, timespan=None) -> Aggregation:
+        series = self.get_series(name)
+        if series:
+            return series.query_metrics(selection_timespan=timespan)
+        raise ValueError
 
     def query(self, name: str, timespan: TimeSpan, count: int):
         """ Query the database on the given signal.
         """
-        serie = self.get_serie(name)
-        if serie:
-            return serie.query(timespan, count)
+        series = self.get_series(name)
+        if series:
+            return series.query(timespan, count)
+        raise ValueError
 
     def query_value(self, name, timestamp):
-        serie = self.get_serie(name)
-        if serie:
-            return serie.query_value(timestamp)
+        series = self.get_series(name)
+        if series:
+            return series.query_value(timestamp)
+        raise ValueError
 
     # Change handlers
     def register_changed_callback(self, callback):
@@ -153,3 +143,4 @@ class TsDb:
         else:
             # Simplest event aggregation: there was an event
             self._event_backlog = True
+

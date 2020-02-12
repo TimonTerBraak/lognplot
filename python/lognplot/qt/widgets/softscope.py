@@ -6,7 +6,8 @@ Include this into your application to view signals.
 import queue
 
 from ..qtapi import QtWidgets, QtCore
-from ...tsdb import TsDb
+from ...tsdb.container import MWayTree
+from ...tsdb.storage import RocksDB
 from .chartwidget import ChartWidget
 from .signal_list_widget import SignalListWidget
 from .timespan_toolbutton import DurationToolButton
@@ -20,7 +21,7 @@ class SoftScope(QtWidgets.QWidget):
 
     def __init__(self):
         super().__init__()
-        self.db = TsDb()
+        self.db = RocksDB(MWayTree)
 
         self._last_span = None  # Tail chasing
 

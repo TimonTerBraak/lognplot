@@ -5,7 +5,7 @@ in a way that they can be queried easily.
 
 """
 
-from .db import TsDb, TimeSeriesDatabase
+from .db import TimeSeriesDatabase
 from .series import Series #, ZoomSerie
 from .aggregation import Aggregation
 from .metrics import Metrics, LogMetrics

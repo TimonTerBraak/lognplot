@@ -80,8 +80,8 @@ class ValueMetrics(Metrics):
                 count=count,
                 minimum=min(self.minimum, other.minimum),
                 maximum=max(self.maximum, other.maximum),
-                first=self.first,
-                last=other.last,
+                first=min(self.first, other.first),
+                last=max(self.last, other.last),
                 mean=mean,
                 m2=m2,
             )
@@ -90,7 +90,7 @@ class ValueMetrics(Metrics):
 
     def __repr__(self):
         return (
-            f"Metrics(count={self.count},minimum={self.minimum},maximum={self.maximum})"
+            f"Metrics(count={self.count},min={self.minimum},max={self.maximum},first={self.first},last={self.last},mean={self.mean})"
         )
 
     @property

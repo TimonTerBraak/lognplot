@@ -19,14 +19,14 @@ class Curve:
         return "Database proxy-curve"
 
     def __len__(self):
-        summary = self._db.query_summary(self.name)
+        summary = self._db.query_metrics(self.name)
         if summary:
             return summary.count
         else:
             return 0
 
-    def query_summary(self, timespan=None) -> Aggregation:
-        return self._db.query_summary(self.name, timespan=timespan)
+    def query_metrics(self, timespan=None) -> Aggregation:
+        return self._db.query_metrics(self.name, timespan=timespan)
 
     def query(self, selection_timespan, min_count):
         # TODO: cache calls here?

@@ -46,34 +46,10 @@ class Series:
         """
         raise NotImplementedError()
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-class ZoomSerie(Series):
-
-    def __repr__(self):
-        return "ZoomSeries"
-
     def get_type(self):
+        return "signal"
+
+        # TODO: support this
         first = next(iter(self), None)
         if first is None:
             return "?"

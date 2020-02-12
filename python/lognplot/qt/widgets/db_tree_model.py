@@ -56,7 +56,8 @@ class TsDbTreeModel(QtCore.QAbstractItemModel):
         parent = QtCore.QModelIndex()
         for row, name_and_type in enumerate(self.names):
             name, _ = name_and_type
-            summary = self.db.query_summary(name)
+            summary = self.db.query_metrics(name)
+
             if summary:
                 signal_data = self.signal_data[name]
                 last_value = summary.metrics.last
