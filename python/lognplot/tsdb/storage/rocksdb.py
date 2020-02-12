@@ -80,7 +80,6 @@ class RocksDB(TimeSeriesDatabase):
                 else:
                     raise ValueError
 
-    # TODO remove from index, and delete
     def create(self, name: str) -> Series:
         """ Updates the index by appending the (key, name) pair to the linked list
             and updated the list head accordingly.
