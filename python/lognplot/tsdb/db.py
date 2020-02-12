@@ -1,5 +1,4 @@
-""" Time series database.
-"""
+""" Time series database. """
 
 import abc
 from typing import Iterator
@@ -13,33 +12,54 @@ class TimeSeriesDatabase(metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
     def __init__(self, cls: Series):
-        raise NotImplementedError
+        """ Intializes a time-series database with the specified container class. """
+        raise NotImplementedError()
+
+    @abc.abstractmethod
+    def __len__(self) -> int:
+        """ Returns the number of time-series contained in the database. """
+        raise NotImplementedError()
 
     @abc.abstractmethod
     def __iter__(self) -> Iterator[Series]:
-        """ Iterators over all series contained in the store.
-        """
-        raise NotImplementedError
+        """ Iterators over all time-series contained in the database. """
+        raise NotImplementedError()
 
     @abc.abstractmethod
-    def next_key(self):
-        raise NotImplementedError
+    def next_key(self) -> int:
+        """ Obtains the next available key for future use. """
+        raise NotImplementedError()
 
     @abc.abstractmethod
     def create(self, name: str) -> Series:
-        raise NotImplementedError
+        """ Create a new time-series, backed by the database. """
+        raise NotImplementedError()
 
     @abc.abstractmethod
-    def get(self, key: int):
-        raise NotImplementedError
+    def delete(self, series: Series):
+        """ Removes the specified time-series from the database. """
+        raise NotImplementedError()
+
+    @abc.abstractmethod
+    def get(self, key: int) -> bytes:
+        """ Returns the database contents associated with the specified key. """
+        raise NotImplementedError()
 
     @abc.abstractmethod
     def set(self, key: int, data: bytes):
-        raise NotImplementedError
+        """ Stores the specified data in the database at the location of the given key. """
+        raise NotImplementedError()
 
     @abc.abstractmethod
     def add(self, data: bytes) -> int:
-        raise NotImplementedError
+        """ Stores the specified data in the database at a new location.
+            The key associated with the new location is returned. """
+        raise NotImplementedError()
+
+    @abc.abstractmethod
+    def clear(self, key: int):
+        """ Removes the data corresponding to the specified key from the database. """
+        raise NotImplementedError()
 
     def get_series(self, name):
         found = None
@@ -98,8 +118,7 @@ class TimeSeriesDatabase(metaclass=abc.ABCMeta):
         raise ValueError
 
     def query(self, name: str, timespan: TimeSpan, count: int):
-        """ Query the database on the given signal.
-        """
+        """ Query the database on the given time-series. """
         series = self.get_series(name)
         if series:
             return series.query(timespan, count)
