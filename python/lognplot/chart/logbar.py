@@ -32,8 +32,8 @@ class LogTrack:
         self._db = db
         self.name = name
 
-    def query_summary(self, timespan=None):
-        return self._db.query_summary(self.name, timespan=timespan)
+    def query_metrics(self, timespan=None):
+        return self._db.query_metrics(self.name, timespan=timespan)
 
     def query(self, selection_timespan, min_count):
         # TODO: cache calls here?

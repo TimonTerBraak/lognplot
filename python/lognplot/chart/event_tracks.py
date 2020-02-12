@@ -54,7 +54,7 @@ class EventTracks:
         # Gather bounding boxes of all curves:
         aggregations = []
         for track in self.tracks:
-            aggregation = track.query_summary(timespan=timespan)
+            aggregation = track.query_metrics(timespan=timespan)
 
             if aggregation:
                 aggregations.append(aggregation)
@@ -69,8 +69,8 @@ class EventTrack:
         self._db = db
         self.name = name
 
-    def query_summary(self, timespan=None):
-        return self._db.query_summary(self.name, timespan=timespan)
+    def query_metrics(self, timespan=None):
+        return self._db.query_metrics(self.name, timespan=timespan)
 
     def query(self, selection_timespan, min_count):
         # TODO: cache calls here?

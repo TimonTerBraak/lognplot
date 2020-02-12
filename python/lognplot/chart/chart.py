@@ -131,7 +131,7 @@ class Chart:
         # Gather bounding boxes of all curves:
         aggregations = []
         for curve in self.curves:
-            aggregation = curve.query_summary(timespan=timespan)
+            aggregation = curve.query_metrics(timespan=timespan)
 
             if aggregation:
                 aggregations.append(aggregation)
