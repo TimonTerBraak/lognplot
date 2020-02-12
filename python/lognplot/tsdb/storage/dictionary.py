@@ -14,8 +14,18 @@ class Dictionary(TimeSeriesDatabase):
         for key, name in self._series.items():
             yield self._cls.create(self, name, key)
 
-    def add_to_index(self, key: int, name: str):
+    def create(self, name: str) -> Series:
         self._series[key] = name
+        return self._cls.create(self, name, key)
+
+    def delete(self, series: Series):
+        # Remove the series from the index.
+        key = series.identifier()
+        self.clear(key)
+        if key in self._series:
+            del self._series[key]
+        # Clear all the samples out of the database.
+        series.clear()
 
     def next_key(self):
         self._lastkey = self._lastkey + 1
@@ -33,3 +43,9 @@ class Dictionary(TimeSeriesDatabase):
         key = self.next_key()
         self._data[key] = data
         return key
+
+    def clear(self, key: int):
+        if key in self._data:
+            del self._data[key]
+
+
