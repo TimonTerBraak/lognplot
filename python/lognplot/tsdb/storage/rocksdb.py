@@ -24,27 +24,59 @@ class RocksDB(TimeSeriesDatabase):
         if metadata:
             self._lastkey, = struct.unpack('i', metadata[0]['largestkey'])
 
-    def __len__(self):
+    def __len__(self) -> int:
         count = 0
         metadata = self.get(0)
         if metadata:
             count, _, _ = struct.unpack('iii', metadata)
         return count
 
-    #[name,key,previous]
-    def __iter__(self): # -> Iterator[Series]:
+    def __iter__(self) -> Iterator[Series]:
         # last will always be empty
         metadata = self.get(0)
         if metadata:
             _, cursor, last = struct.unpack_from('iii', metadata)
+            while cursor != last:
+                record = self.get(cursor)
+                if record is not None:
+                    cursor, key, length = struct.unpack_from('iii', record, 0)
+                    _, _, _, name, = struct.unpack('iii{}s'.format(length), record)
+                    series = self._cls.create(self, name.decode('utf-8'), key)
+                    yield series
+                else:
+                    raise ValueError
+
+    def _update_header(self, count: int, first: int, last: int):
+        header = struct.pack('iii', count, first, last)
+        self.set(0, header)
+
+    def _write_index_entry(self, cursor: int, next_entry: int, key: int, name: str):
+        fmt = 'iii{}s'.format(len(name))
+        data = struct.pack(fmt, next_entry, key, len(name), bytes(name, 'utf-8'))
+        self.set(cursor, data)
+
+    def _remove_from_index(self, key: int):
+        metadata = self.get(0)
+        if metadata:
+            count, first, last = struct.unpack('iii', metadata)
             # Format: [key, next, strlen, name]
             while cursor != last:
                 record = self.get(cursor)
                 if record is not None:
-                    key, cursor, length = struct.unpack_from('iii', record, 0)
-                    name, = struct.unpack_from('{}s'.format(length), record, struct.calcsize('iii'))
-                    series = self._cls.create(self, name.decode('utf-8'), key)
-                    yield series
+                    previous = cursor
+                    cursor, _key, length = struct.unpack_from('iii', record, 0)
+                    if key == _key:
+                        # found it!
+                        # update previous record to point its next to cursor
+                        record = self.get(previous)
+                        _, _key, length = struct.unpack_from('iii', record, 0)
+                        _, _, _, name, = struct.unpack('iii{}s'.format(length), record)
+
+                        self._write_index_entry(previous, cursor, _key, name)
+
+                        if cursor == last:
+                            # update header
+                            self._update_header(count - 1, first, previous)
                 else:
                     raise ValueError
 
@@ -62,14 +94,25 @@ class RocksDB(TimeSeriesDatabase):
             first = self.next_key()
             last = first
         reserved = self.add(bytes())
-        fmt = 'iii{}s'.format(len(name))
-        data = struct.pack(fmt, key, reserved, len(name), bytes(name, 'utf-8'))
-        header = struct.pack('iii', count + 1, first, reserved)
-        self.set(last, data)
-        self.set(0, header)
+        self._write_index_entry(last, reserved, key, name)
+        self._update_header(count + 1, first, reserved)
         return self._cls.create(self, name, key)
 
+    def delete(self, series: Series):
+        key = series.identifier()
+        # Remove the series from the index.
+        self._remove_from_index(key)
+        # Clear all the samples out of the database.
+        series.clear()
+
     def next_key(self) -> int:
+        """ For now, the database size is limited by 32-bit (signed) keys in Python,
+            combined with the number of samples stored per key. We can strecht this
+            limit by reusing keys (overflow) and asking the database to verify that
+            the key does not exist (key_may_exist). A future-proof solution is to
+            increase the key size used in the Python implementation, as the database
+            can handle up-to 8MB key sizes. In the Python implementation, mainly the
+            (de-)serialization has to be updated. """
         key = self._lastkey + 1
         self._lastkey = key
         return key
@@ -85,3 +128,5 @@ class RocksDB(TimeSeriesDatabase):
     def get(self, key: int) -> bytes:
         return self._db.get(struct.pack('i', int(key)))
 
+    def clear(self, key: int):
+        self._db.delete(key)

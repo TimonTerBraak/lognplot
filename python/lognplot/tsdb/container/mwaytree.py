@@ -281,27 +281,37 @@ class MWayTree(Series):
             self._close_tree()
             self._leaf = MWayTreeLeafNode(self._db)
 
-    def _enhance(self, nodes: Sequence[MWayTreeNode], selection_span: TimeSpan):
-        """ Enhance resolution of samples in the selected time span.
-        """
-        assert nodes
-        new_nodes = []
-        if len(nodes) == 1:
-            new_nodes.extend(nodes[0].select_range(selection_span))
-        else:
-            # Assume here first and last selected node overlap partially.
-            assert len(nodes) > 1
-            new_nodes.extend(nodes[0].select_range(selection_span))
-            for node in nodes[1:-1]:
-                new_nodes.extend(node.select_all())
-            new_nodes.extend(nodes[-1].select_range(selection_span))
-        return new_nodes
-
     def __len__(self):
         node = MWayTreeNode.get(self._db, self._rootid)
         if node:
             return node.aggregation.metrics.count
         return 0
+
+    def __iter__(self):
+        key = self._rootid
+        node = MWayTreeNode.get(self._db, key)
+        nodes = [(key,node)]
+        while len(nodes) > 0:
+            keynode, nodes = nodes[0], nodes[1:]
+            key, node = keynode
+            if isinstance(node, MWayTreeInternalNode):
+                for child, aggregation in node.children():
+                    nodes.append((child, MWayTreeNode.get(self._db, child)))
+            else:
+                for sample in node.samples():
+                    yield sample
+
+    def clear(self):
+        key = self._rootid
+        node = MWayTreeNode.get(self._db, key)
+        nodes = [(key,node)]
+        while len(nodes) > 0:
+            keynode, nodes = nodes[0], nodes[1:]
+            key, node = keynode
+            if isinstance(node, MWayTreeInternalNode):
+                for child, aggregation in node.children():
+                    nodes.append((child, MWayTreeNode.get(self._db, child)))
+            self._db.clear(key)
 
     def query(self, selection_timespan: TimeSpan, min_count):
         """ Query this tree for some data between the given points.
