@@ -113,22 +113,22 @@ class TimeSeriesDatabase(metaclass=abc.ABCMeta):
     # Query related functions:
     def query_metrics(self, name: str, timespan=None) -> Aggregation:
         series = self.get_series(name)
-        if series:
+        if series is not None:
             return series.query_metrics(selection_timespan=timespan)
-        raise ValueError
+        raise ValueError(f"Series with '{name}' not found")
 
     def query(self, name: str, timespan: TimeSpan, count: int):
         """ Query the database on the given time-series. """
         series = self.get_series(name)
-        if series:
+        if series is not None:
             return series.query(timespan, count)
-        raise ValueError
+        raise ValueError(f"Series with '{name}' not found")
 
     def query_value(self, name, timestamp):
         series = self.get_series(name)
-        if series:
+        if series is not None:
             return series.query_value(timestamp)
-        raise ValueError
+        raise ValueError(f"Series with '{name}' not found")
 
     # Change handlers
     def register_changed_callback(self, callback):

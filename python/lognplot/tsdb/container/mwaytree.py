@@ -48,17 +48,13 @@ class MWayTreeInternalNode(MWayTreeNode):
     def __init__(self, db):
         self._db = db
         self._children = []
-        # TODO: avoid invalid temporary aggregations
-        self._aggregation = Aggregation.from_sample((0,0))
 
     def children(self):
         return self._children
 
+    # TODO: remove performance bottleneck when reading child nodes
+    # back from storage
     def add_child(self, key: int, aggregation: Aggregation):
-        if len(self._children) == 0:
-            self._aggregation = aggregation
-        elif aggregation is not None: # filter out temp internal node
-            self._aggregation = self._aggregation + aggregation
         self._children.append((key, aggregation))
 
     @property
@@ -67,7 +63,8 @@ class MWayTreeInternalNode(MWayTreeNode):
 
     @property
     def aggregation(self) -> Aggregation:
-        return self._aggregation
+        if len(self.children()):
+            return Aggregation.from_aggregations([agg for _, agg in self.children()])
 
     def __bytes__(self):
         # count of child nodes is negative
@@ -99,13 +96,34 @@ class MWayTreeInternalNode(MWayTreeNode):
 
     def query_value(self, timestamp):
         sample = None
-        for key, agg in self._children:
-            if timestamp >= agg.timespan.begin and timestamp <= agg.timespan.end:
-                node = self.get(self._db, key)
-                sample = node.query_value(timestamp)
-                break
+        children = [key for key, agg in self._children if timestamp >= agg.timespan.begin and timestamp <= agg.timespan.end]
+        if len(children) > 0:
+            node = self.get(self._db, children[0])
+            sample = node.query_value(timestamp)
+
+        #for key, agg in self._children:
+        #    if timestamp >= agg.timespan.begin and timestamp <= agg.timespan.end:
+        #        node = self.get(self._db, key)
+        #        sample = node.query_value(timestamp)
+        #        break
 
         return sample
+
+class MWayTreeRootNode(MWayTreeInternalNode):
+
+    def __init__(self, db):
+        super.__init__(db)
+        # TODO: avoid invalid temporary aggregations
+        self._aggregation = Aggregation.from_sample((0,0))
+        self._aggregation.metrics.count = 0
+
+    def add_child(self, key: int, aggregation: Aggregation):
+        super.add_child(key, aggregation)
+        if len(self._children) == 0:
+            self._aggregation = aggregation
+        elif aggregation is not None: # filter out temp internal node
+            self._aggregation = self._aggregation + aggregation
+
 
 class MWayTreeLeafNode(MWayTreeNode):
 
@@ -243,7 +261,7 @@ class MWayTree(Series):
             key, node = self._ancestors.pop()
             if len(self._ancestors) > 0:
                 parent_key, parent = self._ancestors[-1]
-                parent._children[-1] = (key, node.aggregation)
+                parent._children[-1] = (key, node.aggregation) # WARN: expensive
                 self._db.set(parent_key, bytes(parent))
             else:
                 parent = None
@@ -262,7 +280,7 @@ class MWayTree(Series):
             self._depth = self._depth + 1
             self._ancestors = [(self._rootid, parent)]
 
-        while len(self._ancestors) <= self._depth:
+        while len(self._ancestors) < self._depth:
             parent_key, parent = self._ancestors[-1]
             child = MWayTreeInternalNode(self._db)
             child_key = self._add_node(child)
@@ -282,9 +300,9 @@ class MWayTree(Series):
             self._leaf = MWayTreeLeafNode(self._db)
 
     def __len__(self):
-        node = MWayTreeNode.get(self._db, self._rootid)
-        if node:
-            return node.aggregation.metrics.count
+        root = MWayTreeNode.get(self._db, self._rootid)
+        if root and root.aggregation:
+            return root.aggregation.metrics.count
         return 0
 
     def __iter__(self):
@@ -317,60 +335,50 @@ class MWayTree(Series):
         """ Query this tree for some data between the given points.
         """
         start, end = selection_timespan.begin, selection_timespan.end
-        node = MWayTreeNode.get(self._db, self._rootid)
+        root = MWayTreeNode.get(self._db, self._rootid)
 
-        nodes = [node]
-        selection = [node.aggregation]
+        nodes = [root]
+        selection = [root.aggregation]
 
-        while len(selection) < min_count:
-            new_nodes = []
-            for node in nodes:
-                selection = []
-                if isinstance(node, MWayTreeInternalNode):
-                    for (key, aggregation) in node.children():
-                        if start < aggregation.timespan.end and end > aggregation.timespan.begin:
-                            selection.append(aggregation)
-                            new_nodes.append(MWayTreeNode.get(self._db, key))
-            if len(new_nodes) > 0:
-                nodes = new_nodes
-            else:
-                break
-
-        if len(selection) < min_count:
-            selection = [sample for node in nodes for sample in node.samples() if sample[0] >= start and sample[0] <= end]
+        if root.aggregation.metrics.count > 0:
+            while len(selection) < min_count and len(nodes) > 0:
+                internals = [node for node in nodes if isinstance(node, MWayTreeInternalNode)]
+                children = [n for node in internals for n in node.children()]
+                filtered = [(key, agg) for key, agg in children if start < agg.timespan.end and end > agg.timespan.begin]
+                selection = [agg for key, agg in filtered]
+                candidates = [MWayTreeNode.get(self._db, key) for key, _ in filtered]
+                if len(internals) == 0:
+                    selection = [sample for node in nodes for sample in node.samples() if sample[0] >= start and sample[0] <= end]
+                nodes = candidates
 
         return selection
 
     def query_metrics(self, selection_timespan: TimeSpan) -> Aggregation:
         """ Retrieve aggregation from a given range. """
-        node = MWayTreeNode.get(self._db, self._rootid)
+        root = MWayTreeNode.get(self._db, self._rootid)
 
         if selection_timespan is None:
-            return node.aggregation
+            return root.aggregation
 
-        selection = [node.aggregation]
+        selection = [root.aggregation]
         start, end = selection_timespan.begin, selection_timespan.end
-        nodes = [node]
-        trimmed = True
+        nodes = [root]
 
-        while len(nodes) > 0 and trimmed:
-            trimmed = False
-            new_nodes = []
-            for node in nodes:
-                new_selection = []
-                if isinstance(node, MWayTreeInternalNode):
-                    for (key, aggregation) in node.children():
-                        if start < aggregation.timespan.end and end > aggregation.timespan.begin:
-                            selection.append(aggregation)
-                            new_nodes.append(MWayTreeNode.get(self._db, key))
-                        else:
-                            trimmed = True
-            if trimmed:
+        while len(nodes) > 0:
+            internals = [node for node in nodes if isinstance(node, MWayTreeInternalNode)]
+            children = [n for node in internals for n in node.children()]
+            filtered = [(key, agg) for key, agg in children if start < agg.timespan.end and end > agg.timespan.begin]
+            new_selection = [agg for key, agg in filtered]
+            nodes = []
+
+            if len(new_selection) == 0:
+                break
+
+            if len(children) != len(filtered):
                 selection = new_selection
-                nodes = new_nodes
+                nodes = [MWayTreeNode.get(self._db, key) for key, _ in filtered]
 
-        if len(selection) > 0:
-            return Aggregation.from_aggregations(selection)
+        return Aggregation.from_aggregations(selection)
 
     def query_value(self, timestamp):
         """ Query value closest to the given timestamp.

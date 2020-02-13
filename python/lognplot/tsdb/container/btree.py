@@ -11,49 +11,15 @@ from ...time import TimeSpan
 from ..db import TimeSeriesDatabase
 from ..series import Series
 
-class BtreeNode(metaclass=abc.ABCMeta):
-
-    def __init__(self):
-        pass
-
-    @abc.abstractmethod
-    def select_range(self, selection_span: TimeSpan):
-        raise NotImplementedError()
-
-    @abc.abstractmethod
-    def select_all(self):
-        raise NotImplementedError()
-
-    @abc.abstractmethod
-    def query_value(self, timestamp):
-        raise NotImplementedError()
-
-
-def enhance(nodes, selection_span: TimeSpan):
-    """ Enhance resolution of samples in the selected time span.
-    """
-    assert nodes
-    new_nodes = []
-    if len(nodes) == 1:
-        new_nodes.extend(nodes[0].select_range(selection_span))
-    else:
-        # Assume here first and last selected node overlap partially.
-        assert len(nodes) > 1
-        new_nodes.extend(nodes[0].select_range(selection_span))
-        for node in nodes[1:-1]:
-            new_nodes.extend(node.select_all())
-        new_nodes.extend(nodes[-1].select_range(selection_span))
-    return new_nodes
-
-
 class Btree(Series):
     def __init__(self, db: TimeSeriesDatabase, name: str, identifier: int = -1):
+        self._db = db
         self._name = name
-        self._identifier = db.next_key() if identifier < 0 else identifier
         self._leave_max = 32
         self._internal_node_max = 5
+
+        self._identifier = identifier
         self.root_node = BtreeLeaveNode(self._leave_max)
-        db.add_to_index(self._identifier, self._name)
 
     def name(self):
         return self._name
@@ -66,8 +32,11 @@ class Btree(Series):
         return self.root_node.aggregation
 
     def add(self, sample):
+        self.append(sample)
+
+    def append(self, sample):
         """ Append a single sample. """
-        root_sibling = self.root_node.add(sample)
+        root_sibling = self.root_node.append(sample)
         if root_sibling:
             self._new_root(root_sibling)
 
@@ -79,7 +48,7 @@ class Btree(Series):
             raise NotImplementedError("bulk load")
         else:
             for sample in samples:
-                self.add(sample)
+                self.append(sample)
 
     def _new_root(self, root_sibling):
         """ Construct a new root from the old root and a sibling. """
@@ -120,7 +89,6 @@ class Btree(Series):
 
     def query_metrics(self, selection_timespan: TimeSpan) -> Aggregation:
         """ Retrieve aggregation from a given range. """
-
         partially_selected = [self.root_node]
         selected_aggregations = []
         selected_samples = []
@@ -132,7 +100,7 @@ class Btree(Series):
                 if isinstance(selection[0], BtreeNode):
                     for node in selection:
                         aggregation = node.aggregation
-                        if selection_timespan.covers(aggregation.timespan):
+                        if selection_timespan is None or selection_timespan.covers(aggregation.timespan):
                             selected_aggregations.append(aggregation)
                         else:
                             partially_selected.append(node)
@@ -153,6 +121,54 @@ class Btree(Series):
         Return a timestamp value pair as an observation point.
         """
         return self.root_node.query_value(timestamp)
+
+
+def enhance(nodes, selection_span):
+    """ Enhance resolution by descending into child nodes in the selected time span.
+    """
+    assert nodes
+    new_nodes = []
+    if len(nodes) == 1:
+        new_nodes.extend(nodes[0].select_range(selection_span))
+    else:
+        # Assume here first and last selected node overlap partially.
+        assert len(nodes) > 1
+        new_nodes.extend(nodes[0].select_range(selection_span))
+        for node in nodes[1:-1]:
+            new_nodes.extend(node.select_all())
+        new_nodes.extend(nodes[-1].select_range(selection_span))
+    return new_nodes
+
+
+class BtreeNode(metaclass=abc.ABCMeta):
+    """ Base class for either internal, or leave nodes of the B-tree.
+
+    This class and it's subclasses are for internal usage in the B-tree.
+    Do not use outside this file.
+    """
+
+    def __init__(self):
+        pass
+
+    @abc.abstractmethod
+    def append(self, sample):
+        raise NotImplementedError()
+
+    @abc.abstractmethod
+    def append_leave(self, leave_node):
+        raise NotImplementedError()
+
+    @abc.abstractmethod
+    def select_range(self, selection_span: TimeSpan):
+        raise NotImplementedError()
+
+    @abc.abstractmethod
+    def select_all(self):
+        raise NotImplementedError()
+
+    @abc.abstractmethod
+    def query_value(self, timestamp):
+        raise NotImplementedError()
 
 
 class BtreeInternalNode(BtreeNode):
@@ -221,12 +237,12 @@ class BtreeInternalNode(BtreeNode):
 
         in_range_children = []
         full_span = self.aggregation.timespan
-        if selection_span.overlaps(full_span):
+        if selection_span is None or selection_span.overlaps(full_span):
             # In range, so:
             # Some overlap!
             # Find first node:
             for node in self._children:
-                if selection_span.overlaps(node.aggregation.timespan):
+                if selection_span is None or selection_span.overlaps(node.aggregation.timespan):
                     in_range_children.append(node)
 
         return in_range_children
@@ -267,7 +283,7 @@ class BtreeLeaveNode(BtreeNode):
         return len(self.samples) >= self.max_samples
 
     def _add_sample(self, sample):
-        self.samples.add(sample)
+        self.samples.append(sample)
 
         # Update metrics:
         aggregation = Aggregation.from_sample(sample)
@@ -276,7 +292,7 @@ class BtreeLeaveNode(BtreeNode):
         else:
             self._aggregation = aggregation
 
-    def add(self, sample):
+    def append(self, sample):
         if len(self.samples) < self.max_samples:
             self._add_sample(sample)
         else:
@@ -300,13 +316,13 @@ class BtreeLeaveNode(BtreeNode):
 
         full_span = self.aggregation.timespan
         in_range_samples = []
-        if selection_span.overlaps(full_span):
+        if selection_span is not None and selection_span.overlaps(full_span):
             # In range, so:
             # Some overlap!
             # Find first node:
             for sample in self.samples:
                 if selection_span.contains_timestamp(sample[0]):
-                    in_range_samples.add(sample)
+                    in_range_samples.append(sample)
         else:
             # out of range
             pass
