@@ -6,5 +6,6 @@ in a way that they can be queried easily.
 """
 
 from .dictionary import Dictionary
+from .memory import Memory
 # TODO: optionally import, only when rocksdb is available?
 from .rocksdb import RocksDB

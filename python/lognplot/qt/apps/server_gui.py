@@ -10,8 +10,8 @@ from ..qtapi import QtWidgets, Qt, QtGui
 from ..widgets import SoftScope, Dashboard, SignalListWidget
 from ..widgets.timespan_toolbutton import DurationToolButton
 from ...server import run_server
-from ...tsdb.container import MWayTree
-from ...tsdb.storage import RocksDB
+from ...tsdb.container import *
+from ...tsdb.storage import *
 from ...demo_data import create_demo_samples, create_demo_log_messages
 
 
@@ -27,7 +27,7 @@ class ServerGuiMainWindow(QtWidgets.QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.db = RocksDB(MWayTree)
+        self.db = Memory(Btree) #RocksDB(MWayTree)
         if len(self.db) == 0:
             self.db.add_samples("C1", create_demo_samples(1000))
             self.db.add_samples("C2", create_demo_samples(1000, offset=60))
