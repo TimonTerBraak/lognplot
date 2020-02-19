@@ -30,9 +30,9 @@ Features:
     - Rust
 - Export data to HDF5
 - Data adapters for:
+    - ADS
     - MQTT
-    - ROS (planned)
-    - ADS (planned)
+    - ROS2
 
 # Video
 
@@ -75,7 +75,7 @@ First clone this repository:
 For python, follow this steps:
 
     $ cd lognplot/python
-    $ pip install --editable .
+    $ pip install .
     $ python -m lognplot
 
 For rust, follow these steps:
