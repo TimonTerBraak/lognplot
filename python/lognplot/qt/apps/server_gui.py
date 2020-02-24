@@ -27,7 +27,10 @@ class ServerGuiMainWindow(QtWidgets.QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.db = Memory(Btree) #RocksDB(MWayTree)
+        self.db = Memory(Btree)
+        #self.db = Dictionary(MwayTree)
+        #self.db = RocksDB(MWayTree)
+
         if len(self.db) == 0:
             self.db.add_samples("C1", create_demo_samples(1000))
             self.db.add_samples("C2", create_demo_samples(1000, offset=60))

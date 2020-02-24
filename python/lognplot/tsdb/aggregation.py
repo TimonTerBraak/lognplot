@@ -37,6 +37,10 @@ class Aggregation:
 
     def __add__(self, other):
         if isinstance(other, Aggregation):
+            if self.metrics.count == 0:
+                return other
+            if other.metrics.count == 0:
+                return self
             metrics = self.metrics + other.metrics
             timespan = TimeSpan.from_timespans([self.timespan, other.timespan])
             return Aggregation(timespan, metrics)

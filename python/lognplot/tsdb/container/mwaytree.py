@@ -52,8 +52,6 @@ class MWayTreeInternalNode(MWayTreeNode):
     def children(self):
         return self._children
 
-    # TODO: remove performance bottleneck when reading child nodes
-    # back from storage
     def add_child(self, key: int, aggregation: Aggregation):
         self._children.append((key, aggregation))
 
@@ -63,8 +61,8 @@ class MWayTreeInternalNode(MWayTreeNode):
 
     @property
     def aggregation(self) -> Aggregation:
-        if len(self.children()):
-            # TODO: this should not be required (in all cases)
+        if len(self._children) > 0:
+            # NOTE: the pre-calculated aggregation may already be available one level up!
             return Aggregation.from_aggregations([agg for _, agg in self.children()])
 
     def __bytes__(self):
@@ -99,7 +97,7 @@ class MWayTreeInternalNode(MWayTreeNode):
         sample = None
         children = [key for key, agg in self._children if timestamp >= agg.timespan.begin and timestamp <= agg.timespan.end]
         if len(children) > 0:
-            # It should be just a signle node, right?
+            # It should be just a single node, right?
             node = self.get(self._db, children[0])
             sample = node.query_value(timestamp)
 
@@ -111,18 +109,15 @@ class MWayTreeLeafNode(MWayTreeNode):
     def __init__(self, db: TimeSeriesDatabase):
         self._db = db
         self._samples = []
+        self._mean = 0
+        self._m2 = 0
 
     def add(self, sample):
         _, y = sample
         if len(self._samples) == 0:
-            self._min = y
-            self._max = y
-            self._sum = y
             self._mean = y
             self._m2 = 0
         else:
-            self._min = min(self._min, y)
-            self._max = max(self._max, y)
             delta = y - self._mean
             self._mean = self._mean + (delta / len(self._samples))
             delta2 = y - self._mean
@@ -131,18 +126,21 @@ class MWayTreeLeafNode(MWayTreeNode):
 
     @property
     def timespan(self):
+        x0, x1 = 0, 0
         if len(self._samples) > 0:
-            begin = self._samples[0][0]
-            end = self._samples[-1][0]
-            return TimeSpan(begin, end)
-        return TimeSpan(0, 0)
+            x0, _ = self._samples[0]
+            x1, _ = self._samples[-1]
+        return TimeSpan(x0, x1)
 
     @property
     def metrics(self):
         if len(self._samples) > 0:
-            return ValueMetrics(len(self._samples), self._min, self._max, self._samples[0][1], self._samples[-1][1], self._mean, self._m2)
+            values = [y for _, y in self._samples]
+            return ValueMetrics(len(self._samples), min(values), max(values), values[0], values[-1], self._mean, self._m2)
         else:
-            return ValueMetrics(0, 1e9, -1e9, 0, 0, 0, 0)
+            # NOTE: we also need metrics for empty nodes to be able to know that it holds 0 samples.
+            # NOTE: merging of metrics now considers the '0 samples' case.
+            return ValueMetrics(0, 0, 0, 0, 0, 0, 0)
 
     def samples(self):
         return self._samples
@@ -190,14 +188,14 @@ class MWayTreeLeafNode(MWayTreeNode):
 
 class MWayTree(Series):
 
-    def __init__(self, db: TimeSeriesDatabase, name: str, rootid: int = -1, fan_out: int = 16):
+    def __init__(self, db: TimeSeriesDatabase, name: str, rootid: int = -1, fan_out: int = 64):
         self._db = db
         self._name = name
         self._rootid = rootid
         self._fan_out = fan_out
         self._depth = 0
         self._ancestors = []
-        self._leaf = MWayTreeLeafNode(self._db)
+        self._leaf = None
         self._open_tree()
 
     def name(self) -> str:
@@ -207,61 +205,74 @@ class MWayTree(Series):
         return self._rootid
 
     def __del__(self):
-        self._close_tree()
+        if self._leaf is not None:
+            self._add_leaf(self._leaf)
 
     def _open_tree(self):
-        self._ancestors = []
         key = self._rootid
         node = MWayTreeNode.get(self._db, key)
+        self._ancestors = []
         while isinstance(node, MWayTreeInternalNode):
             self._ancestors.append((key,node))
-            if len(node.children()) == 0:
-                break
-            key, _ = node.children()[-1]
-            node = MWayTreeNode.get(self._db, key)
-            self._depth = self._depth + 1
-
-        if len(self._ancestors) == 0:
-            self._maybe_expand_tree()
-
-    def _close_tree(self):
-        parent_key, parent = self._get_parent()
-        key = self._add_node(self._leaf)
-        # add this leaf to its parent with (begin, end, mean)
-        parent.add_child(key, self._leaf.aggregation)
-        self._db.set(parent_key, bytes(parent))
-        self._maybe_expand_tree()
-
-    # Adds a new layer of internals starting from the last ancestors, if any
-    def _get_parent(self) -> (int, MWayTreeNode):
-        return self._ancestors[-1]
-
-    def _maybe_expand_tree(self):
-        # Traverse the tree upwards if nodes are completely filled
-        parent = self._ancestors[-1][1] if len(self._ancestors) > 0 else None
-        while parent is not None and len(parent.children()) == self._fan_out:
-            key, node = self._ancestors.pop()
-            if len(self._ancestors) > 0:
-                parent_key, parent = self._ancestors[-1]
-                parent._children[-1] = (key, node.aggregation) # WARN: expensive
-                self._db.set(parent_key, bytes(parent))
+            if len(node.children()) > 0:
+                key, _ = node.children()[-1]
+                node = MWayTreeNode.get(self._db, key)
             else:
-                parent = None
+                break
+        self._depth = len(self._ancestors)
 
-        if parent is None:
-            parent = MWayTreeInternalNode(self._db)
-            # Complete filling, replace old root with new internal node,
-            # increasing the capacity of the tree.
-            root = MWayTreeNode.get(self._db, self._rootid) if self._rootid > 0 else None
-            if root is not None:
-                # Move the entire tree as a subtree under a newly created root node.
-                new_key_for_old_root = self._add_node(root)
-                parent.add_child(new_key_for_old_root, root.aggregation)
-            self._db.set(self._rootid, bytes(parent))
-            # depth just increased by adding another level
-            self._depth = self._depth + 1
-            self._ancestors = [(self._rootid, parent)]
+    def _get_parent_with_capacity(self) -> (int, MWayTreeNode):
+        if len(self._ancestors) == 0:
+            # A new layer to the tree.
+            self._add_branch()
+        elif len(self._ancestors) < self._depth:
+            self._grow_branch()
+        key, parent = self._ancestors[-1]
+        if len(parent.children()) == self._fan_out:
+            # Parent is already completely filled.
+            self._ancestors.pop()
+            key, parent = self._get_parent_with_capacity()
 
+        return (key, parent)
+
+    def _add_leaf(self, node: MWayTreeLeafNode):
+        _, parent = self._get_parent_with_capacity()
+        key = self._add_node(node)
+        # add this leaf to its parent with its aggregation calculated in the loop.
+        parent.add_child(key, None)
+
+        # Traverse the tree upwards (reverse) to update all aggregations
+        for pkey, pnode in self._ancestors[::-1]:
+            pnode._children[-1] = (key, node.aggregation)
+            self._db.set(pkey, bytes(pnode))
+
+            if len(pnode.children()) == self._fan_out:
+                # remove parent from the list of ancestors (with capacity)
+                self._ancestors.pop()
+
+            if len(self._ancestors) == 0:
+                # Have to insert new root node
+                self._add_branch()
+                break
+
+            key, node = pkey, pnode
+
+    def _add_branch(self):
+        parent = MWayTreeInternalNode(self._db)
+        # Complete filling, replace old root with new internal node,
+        # increasing the capacity of the tree.
+        root = MWayTreeNode.get(self._db, self._rootid) if self._rootid > 0 else None
+        if root is not None:
+            # Move the entire tree as a subtree under a newly created root node.
+            new_key_for_old_root = self._add_node(root)
+            parent.add_child(new_key_for_old_root, root.aggregation)
+        self._db.set(self._rootid, bytes(parent))
+        # depth just increased by adding another level
+        self._depth = self._depth + 1
+        self._ancestors = [(self._rootid, parent)]
+        self._grow_branch()
+
+    def _grow_branch(self):
         while len(self._ancestors) < self._depth:
             parent_key, parent = self._ancestors[-1]
             child = MWayTreeInternalNode(self._db)
@@ -276,16 +287,16 @@ class MWayTree(Series):
         return key
 
     def add(self, sample: (int, float)):
+        if self._leaf is None:
+            self._leaf = MWayTreeLeafNode(self._db)
         self._leaf.add(sample)
         if len(self._leaf) == self._fan_out:
-            self._close_tree()
-            self._leaf = MWayTreeLeafNode(self._db)
+            self._add_leaf(self._leaf)
+            self._leaf = None
 
     def __len__(self):
-        root = MWayTreeNode.get(self._db, self._rootid)
-        if root and root.aggregation:
-            return root.aggregation.metrics.count
-        return 0
+        agg = self.query_metrics(None)
+        return agg.metrics.count if agg is not None else 0
 
     def __iter__(self):
         key = self._rootid
@@ -320,15 +331,15 @@ class MWayTree(Series):
         nodes = [node]
         selection = []
 
-        if node.aggregation.metrics.count > 0:
-            while len(selection) < min_count and len(nodes) > 0:
-                internals = [node for node in nodes if isinstance(node, MWayTreeInternalNode)]
-                children = [n for node in internals for n in node.children()]
-                if len(children) == 0:
-                    return [sample for node in nodes for sample in node.samples() if selection_timespan.begin <= sample[0] <= selection_timespan.end]
-                else:
-                    selection = [(key, agg) for key, agg in children if selection_timespan is None or selection_timespan.overlaps(agg.timespan)]
-                    nodes = [MWayTreeNode.get(self._db, key) for key, _ in selection]
+        while len(selection) < min_count and len(nodes) > 0:
+            internals = [node for node in nodes if isinstance(node, MWayTreeInternalNode)]
+            children = [n for node in internals for n in node.children()]
+            if len(children) == 0:
+                leafs = [node for node in nodes if isinstance(node, MWayTreeLeafNode)]
+                return [sample for leaf in leafs for sample in leaf.samples() if selection_timespan.begin <= sample[0] <= selection_timespan.end]
+            else:
+                selection = [(key, agg) for key, agg in children if selection_timespan is None or selection_timespan.overlaps(agg.timespan)]
+                nodes = [MWayTreeNode.get(self._db, key) for key, _ in selection]
 
         return [agg for _, agg in selection]
 
@@ -336,17 +347,20 @@ class MWayTree(Series):
         """ Retrieve aggregation from a given range. """
         root = MWayTreeNode.get(self._db, self._rootid)
 
-        selection = [self._leaf.aggregation] if len(self._leaf.samples()) > 0 else []
-        if selection_timespan is None:
-            selection.append(root.aggregation)
-        else:
-            nodes = [root]
+        selection = []
 
-            while len(nodes) > 0:
-                internals = [node for node in nodes if isinstance(node, MWayTreeInternalNode)]
-                children = [n for node in internals for n in node.children()]
-                selection.extend([agg for _, agg in children if selection_timespan.covers(agg.timespan)])
-                nodes = [MWayTreeNode.get(self._db, key) for key, agg in children if not selection_timespan.covers(agg.timespan) and selection_timespan.overlaps(agg.timespan)]
+        nodes = [root]
+        while len(nodes) > 0:
+            internals = [node for node in nodes if isinstance(node, MWayTreeInternalNode)]
+            children = [n for node in internals for n in node.children()]
+            selection.extend([agg for _, agg in children if selection_timespan is None or selection_timespan.covers(agg.timespan)])
+            nodes = [MWayTreeNode.get(self._db, key) for key, agg in children
+                            if selection_timespan is not None
+                                and not selection_timespan.covers(agg.timespan)
+                                    and selection_timespan.overlaps(agg.timespan)]
+
+        if self._leaf is not None and (selection_timespan is not None or selection_timespan.covers(self._leaf.aggregation.timespan)):
+            selection.extend(self._leaf.aggregation)
 
         if len(selection) > 0:
             return Aggregation.from_aggregations(selection)
@@ -356,8 +370,7 @@ class MWayTree(Series):
 
         Return a timestamp value pair as an observation point.
         """
-        node = MWayTreeNode.get(self._db, self._rootid)
-        return node.query_value(timestamp) if node is not None else None
+        return MWayTreeNode.get(self._db, self._rootid).query_value(timestamp)
 
     def print_tree(self):
         key = self._rootid
@@ -372,4 +385,23 @@ class MWayTree(Series):
                     nodes.append((child, MWayTreeNode.get(self._db, child)))
             else:
                 print(f"[{key}]: {node._samples}")
+
+    def print_graphviz(self):
+        key = self._rootid
+        node = MWayTreeNode.get(self._db, key)
+        nodes = [(key,node)]
+        print("digraph {")
+        while len(nodes) > 0:
+            keynode, nodes = nodes[0], nodes[1:]
+            key, node = keynode
+            if isinstance(node, MWayTreeInternalNode):
+                for child, aggregation in node.children():
+                    print(f"{key} -> {child};")
+                    nodes.append((child, MWayTreeNode.get(self._db, child)))
+            else:
+                idx = 0
+                for x, y in node.samples():
+                    print(f"{key} -> {x}.{y}")
+                    idx = idx + 1
+        print("}")
 
