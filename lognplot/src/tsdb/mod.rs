@@ -11,6 +11,7 @@ mod observation;
 mod query;
 mod sample;
 mod trace;
+mod keyvaluestore;
 
 pub use aggregation::Aggregation;
 use btree::Btree;
